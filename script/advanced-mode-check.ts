@@ -66,6 +66,15 @@ const directivePool = [
   "Comms lead publishes one bilingual advisory in 5 minutes, checkpoint at T+10m, KPI: rumor correction rate above 90%.",
 ];
 
+const wrappedArabicDirective = `المطلوب في الخطوة التالية
+
+وجّه مسؤول التكامل التقني بوزارة الصحة لربط نظام حجز الحافلات بلوحة غرفة العمليات خلال 45 دقيقة، مع إلزام جميع المشغلين (كبار وصغار) بالتسجيل، وKPI: رفع نسبة الحافلات المبلغ عن وصولها مسبقا إلى 85% خلال الساعتين القادمتين.
+
+• تم تحديد الجهة المسؤولة
+• تم تحديد الإجراء
+• تم تحديد التوقيت
+• تم تحديد مؤشر الأداء`;
+
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
@@ -368,10 +377,11 @@ async function loadScenarioId(): Promise<string> {
 function buildAdvancedBody(
   scenarioId: string,
   userContent: string,
+  language: "en" | "ar" = "en",
 ): JsonRecord {
   return {
     scenarioId,
-    language: "en",
+    language,
     sectorId: "crowdEvents",
     role: "Regional Crisis Coordination Lead",
     currentScores: defaultScores,
@@ -478,6 +488,24 @@ async function runFunctionalChecks(scenarioId: string): Promise<void> {
   assert(
     !fallback.data.assistantMessage.includes("State the command now:"),
     "Detailed directive should continue scenario flow instead of forcing the generic command reprompt",
+  );
+
+  currentMockMode = "upstream_error";
+  const wrappedFallback = await requestJson<AdvancedResponse>(
+    advancedPath,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildAdvancedBody(scenarioId, wrappedArabicDirective, "ar")),
+    },
+  );
+  assert(
+    wrappedFallback.data.scoreDeltas.responseTempo >= 0,
+    "Wrapped Arabic directive should not be penalized as missing execution detail in fallback",
+  );
+  assert(
+    !wrappedFallback.data.assistantMessage.includes("حدّد الآن أمرا تنفيذيا واضحا"),
+    "Wrapped Arabic directive should continue flow instead of resetting to generic command prompt",
   );
 
   currentMockMode = "valid";

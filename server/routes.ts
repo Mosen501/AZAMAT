@@ -486,6 +486,44 @@ function isBinaryReply(raw: string | undefined, language: Language): boolean {
   return words.every((word) => englishBinary.has(word));
 }
 
+function extractDirectiveCandidate(raw: string | undefined): string {
+  const text = raw?.trim() ?? "";
+  if (!text) {
+    return "";
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const isChecklistLine = (line: string): boolean => /^[-•*]\s*/.test(line);
+  const hasDirectiveSignal = (line: string): boolean =>
+    /(يوجّه|وجّه|وجّهوا|فعّل|نفّذ|حدّد|أصدر|direct|issue|activate|deploy|dispatch|enforce|start)\b/i.test(line);
+  const hasKpiSignal = (line: string): boolean =>
+    /(kpi|مؤشر|%|<=|>=|≤|≥|target|sla)/i.test(line);
+  const hasTimingSignal = (line: string): boolean =>
+    /(خلال|دقيقة|دقائق|ساعة|ساعات|within|minute|minutes|hour|hours|t\+\d+)/i.test(line);
+
+  const ranked = lines
+    .filter((line) => !isChecklistLine(line))
+    .map((line) => ({
+      line,
+      score:
+        Number(hasDirectiveSignal(line)) * 3 +
+        Number(hasTimingSignal(line)) * 2 +
+        Number(hasKpiSignal(line)) * 2,
+    }))
+    .sort((left, right) => right.score - left.score);
+
+  const best = ranked[0];
+  if (!best || best.score <= 0) {
+    return text;
+  }
+
+  return best.line;
+}
+
 interface CommandDirectiveSignals {
   hasOwner: boolean;
   hasAction: boolean;
@@ -872,7 +910,7 @@ function buildAdvancedFallback(
   input: z.infer<typeof api.advanced.chat.input>,
 ): AdvancedTurnResult {
   const lastUserMessage = [...input.history].reverse().find((entry) => entry.role === "user");
-  const lastDirective = lastUserMessage?.content;
+  const lastDirective = extractDirectiveCandidate(lastUserMessage?.content);
   const binaryReply = isBinaryReply(lastDirective, input.language);
   const directiveSignals = evaluateDirectiveSignals(lastDirective);
   const completeness = countDirectiveSignals(directiveSignals);
