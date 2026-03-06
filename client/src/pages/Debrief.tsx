@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { CyberButton } from "@/components/CyberButton";
@@ -8,15 +8,40 @@ import { useGenerateDebrief } from "@/hooks/use-api";
 import { useLanguage } from "@/lib/language";
 import { METRIC_CONFIG } from "@/lib/metric-config";
 import { localizeRole } from "@/lib/role-copy";
+import type { AdvancedChatMessage, RunHistoryItem, ScoreSet } from "@shared/schema";
 import { FileText, CheckCircle2, AlertTriangle, Target, ListChecks, RotateCcw } from "lucide-react";
 import { motion } from "framer-motion";
 
+function buildRunHistoryFromAdvancedChat(
+  messages: AdvancedChatMessage[],
+  scores: ScoreSet,
+): RunHistoryItem[] {
+  const userMessages = messages.filter((message) => message.role === "user");
+
+  return userMessages.map((_, index) => ({
+    stepId: `advanced-turn-${index + 1}`,
+    choiceId: `directive-${index + 1}`,
+    timestamp: 1_700_000_000_000 + index * 1000,
+    scoresAfter: scores,
+  }));
+}
+
 export default function Debrief() {
   const [, setLocation] = useLocation();
-  const { state, resetSimulation, restartRun } = useSimulation();
+  const { state, resetSimulation, restartRun, setPreloadedDebrief } = useSimulation();
   const { text, isArabic } = useLanguage();
   const [requestedLanguage, setRequestedLanguage] = useState<"en" | "ar" | null>(null);
   const targetLanguage = isArabic ? "ar" : "en";
+  const historyForDebrief = useMemo(
+    () =>
+      state.level === "advanced"
+        ? (state.history.length > 0
+          ? state.history
+          : buildRunHistoryFromAdvancedChat(state.advancedChatHistory, state.scores))
+        : state.history,
+    [state.level, state.advancedChatHistory, state.scores, state.history],
+  );
+  const hasAdvancedUserMessages = state.advancedChatHistory.some((entry) => entry.role === "user");
   
   const {
     mutate: generateDebrief,
@@ -26,28 +51,49 @@ export default function Debrief() {
     error,
     reset: resetDebrief,
   } = useGenerateDebrief();
+  const activeDebrief = state.preloadedDebrief ?? debrief;
 
   useEffect(() => {
-    // Only generate if we have a role and history
-    if (state.level !== "beginner" || !state.role || !state.scenarioId || state.history.length === 0) {
+    if (!state.role || !state.scenarioId || (state.level !== "beginner" && state.level !== "advanced")) {
+      setLocation("/");
+      return;
+    }
+
+    if (state.level === "beginner" && historyForDebrief.length === 0) {
+      setLocation("/");
+      return;
+    }
+
+    if (state.level === "advanced" && !hasAdvancedUserMessages) {
       setLocation("/");
       return;
     }
 
     // Trigger debrief generation if we don't have it yet
-    if (!debrief && !isPending && !isError) {
+    if (!activeDebrief && !isPending && !isError) {
       setRequestedLanguage(targetLanguage);
       generateDebrief({
         scenarioId: state.scenarioId,
         language: targetLanguage,
         role: state.role,
-        history: state.history,
+        history: historyForDebrief,
+        chatHistory: state.level === "advanced" ? state.advancedChatHistory : undefined,
       });
     }
-  }, [state, debrief, isPending, isError, generateDebrief, setLocation, targetLanguage]);
+  }, [
+    state,
+    activeDebrief,
+    isPending,
+    isError,
+    generateDebrief,
+    setLocation,
+    targetLanguage,
+    historyForDebrief,
+    hasAdvancedUserMessages,
+  ]);
 
   useEffect(() => {
-    if (!debrief || isPending || isError || !state.role || !state.scenarioId) {
+    if (!activeDebrief || isPending || isError || !state.role || !state.scenarioId) {
       return;
     }
 
@@ -55,35 +101,42 @@ export default function Debrief() {
       return;
     }
 
+    setPreloadedDebrief(null);
     resetDebrief();
     setRequestedLanguage(targetLanguage);
     generateDebrief({
       scenarioId: state.scenarioId,
       language: targetLanguage,
       role: state.role,
-      history: state.history,
+      history: historyForDebrief,
+      chatHistory: state.level === "advanced" ? state.advancedChatHistory : undefined,
     });
   }, [
-    debrief,
+    activeDebrief,
     isPending,
     isError,
     state.role,
     state.scenarioId,
-    state.history,
+    state.level,
+    state.advancedChatHistory,
+    historyForDebrief,
     requestedLanguage,
     targetLanguage,
+    setPreloadedDebrief,
     resetDebrief,
     generateDebrief,
   ]);
 
   const handleRestartSameSetup = () => {
+    setPreloadedDebrief(null);
     resetDebrief();
     setRequestedLanguage(null);
     restartRun();
-    setLocation("/sim");
+    setLocation(state.level === "advanced" ? "/advanced" : "/sim");
   };
 
   const handleReturnHome = () => {
+    setPreloadedDebrief(null);
     resetDebrief();
     setRequestedLanguage(null);
     resetSimulation();
@@ -113,7 +166,7 @@ export default function Debrief() {
     );
   }
 
-  if (isPending || !debrief) {
+  if (isPending || !activeDebrief) {
     return (
       <Layout className="items-center justify-center">
         <motion.div 
@@ -141,7 +194,7 @@ export default function Debrief() {
     );
   }
 
-  const isOfflineFallback = debrief.summary.some(
+  const isOfflineFallback = activeDebrief.summary.some(
     (line) =>
       line.includes("Live AI was unavailable") ||
       line.includes("تعذر الوصول إلى OpenAI") ||
@@ -229,7 +282,7 @@ export default function Debrief() {
             <Section
               title={text("Executive Summary", "الملخص التنفيذي")}
               icon={<FileText />}
-              items={debrief.summary}
+              items={activeDebrief.summary}
               type="info"
             />
           </div>
@@ -237,13 +290,13 @@ export default function Debrief() {
           <Section
             title={text("What Went Well", "ما سار بشكل جيد")}
             icon={<CheckCircle2 />}
-            items={debrief.wentWell}
+            items={activeDebrief.wentWell}
             type="success"
           />
           <Section
             title={text("What To Improve", "ما يجب تحسينه")}
             icon={<Target />}
-            items={debrief.toImprove}
+            items={activeDebrief.toImprove}
             type="warning"
           />
           
@@ -251,7 +304,7 @@ export default function Debrief() {
             <Section
               title={text("Missed Signals", "الإشارات التي فاتت")}
               icon={<AlertTriangle />}
-              items={debrief.missedSignals}
+              items={activeDebrief.missedSignals}
               type="danger"
             />
           </div>
@@ -260,7 +313,7 @@ export default function Debrief() {
             <Section
               title={text("Next-Time Checklist", "قائمة المراجعة للمرة القادمة")}
               icon={<ListChecks />}
-              items={debrief.checklist}
+              items={activeDebrief.checklist}
               type="info"
             />
           </div>

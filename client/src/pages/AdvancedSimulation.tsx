@@ -2,22 +2,45 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { CyberButton } from "@/components/CyberButton";
-import { useAdvancedChatTurn, useScenario, useTrainingConfig } from "@/hooks/use-api";
+import { ScoreGauge } from "@/components/ScoreGauge";
+import { useAdvancedChatTurn, useGenerateDebrief, useScenario, useTrainingConfig } from "@/hooks/use-api";
 import { useSimulation } from "@/hooks/use-simulation";
 import { useLanguage } from "@/lib/language";
+import { METRIC_CONFIG } from "@/lib/metric-config";
 import { localizeRole } from "@/lib/role-copy";
 import { localizeScenario } from "@/lib/scenario-copy";
 import { getRulesForSelection } from "@/lib/training-config";
-import type { AdvancedChatMessage } from "@shared/schema";
-import { Bot, Send, User, AlertTriangle } from "lucide-react";
+import type { AdvancedChatMessage, RunHistoryItem, ScoreSet } from "@shared/schema";
+import { Bot, Send, User, AlertTriangle, Clock } from "lucide-react";
+
+function buildRunHistoryFromAdvancedChat(
+  messages: AdvancedChatMessage[],
+  scores: ScoreSet,
+): RunHistoryItem[] {
+  const userMessages = messages.filter((message) => message.role === "user");
+
+  return userMessages.map((_, index) => ({
+    stepId: `advanced-turn-${index + 1}`,
+    choiceId: `directive-${index + 1}`,
+    timestamp: 1_700_000_000_000 + index * 1000,
+    scoresAfter: scores,
+  }));
+}
 
 export default function AdvancedSimulation() {
   const [, setLocation] = useLocation();
-  const { state, resetSimulation } = useSimulation();
+  const {
+    state,
+    resetSimulation,
+    setAdvancedChatHistory,
+    setPreloadedDebrief,
+    recordChoice,
+  } = useSimulation();
   const { text, isArabic } = useLanguage();
   const { data: scenario, isLoading, isError } = useScenario(state.scenarioId);
   const { data: trainingConfig } = useTrainingConfig();
   const chatTurn = useAdvancedChatTurn();
+  const debrief = useGenerateDebrief();
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<AdvancedChatMessage[]>([]);
   const [isOfflineFallbackMode, setIsOfflineFallbackMode] = useState(false);
@@ -39,6 +62,10 @@ export default function AdvancedSimulation() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages]);
+
+  useEffect(() => {
+    setAdvancedChatHistory(messages.slice(-24));
+  }, [messages, setAdvancedChatHistory]);
 
   const localizedScenario = scenario ? localizeScenario(scenario, isArabic) : null;
   const selectedRules = useMemo(() => {
@@ -71,6 +98,9 @@ export default function AdvancedSimulation() {
       });
   }, [state.sectorId, state.role, trainingConfig]);
   const requestLanguage = isArabic ? "ar" : "en";
+  const hasUserDirective = messages.some((message) => message.role === "user");
+  const userTurnCount = messages.filter((message) => message.role === "user").length;
+  const timelineLabel = `T+${userTurnCount * 5}m`;
 
   const localizedRules = useMemo(
     () => selectedRules.map((rule) => (isArabic ? rule.ar : rule.en)),
@@ -126,6 +156,7 @@ export default function AdvancedSimulation() {
         language: requestLanguage,
         sectorId: state.sectorId,
         role: state.role,
+        currentScores: state.scores,
         responseRules: localizedRules,
         history: nextHistory,
       },
@@ -141,6 +172,12 @@ export default function AdvancedSimulation() {
             ...current,
             { role: "assistant", content: response.assistantMessage },
           ]);
+          const turnNumber = nextHistory.filter((entry) => entry.role === "user").length;
+          recordChoice(
+            `advanced-turn-${turnNumber}`,
+            `directive-${turnNumber}`,
+            response.scoreDeltas,
+          );
         },
         onError: () => {
           setIsOfflineFallbackMode(true);
@@ -151,6 +188,46 @@ export default function AdvancedSimulation() {
               content: text(
                 "AI coaching is temporarily unavailable. Continue with your next decision and I will keep evaluating your approach.",
                 "خدمة التوجيه الذكي غير متاحة مؤقتا. واصل قرارك التالي وسأستمر في تقييم أسلوب استجابتك.",
+              ),
+            },
+          ]);
+        },
+      },
+    );
+  };
+
+  const handleCloseIncidentAndDebrief = () => {
+    if (!state.scenarioId || !state.role || debrief.isPending) {
+      return;
+    }
+
+    const chatHistory = messages.slice(-24);
+    const historyForDebrief =
+      state.history.length > 0
+        ? state.history
+        : buildRunHistoryFromAdvancedChat(chatHistory, state.scores);
+
+    debrief.mutate(
+      {
+        scenarioId: state.scenarioId,
+        language: requestLanguage,
+        role: state.role,
+        history: historyForDebrief,
+        chatHistory,
+      },
+      {
+        onSuccess: (report) => {
+          setPreloadedDebrief(report);
+          setLocation("/debrief");
+        },
+        onError: () => {
+          setMessages((current) => [
+            ...current,
+            {
+              role: "assistant",
+              content: text(
+                "Unable to generate the After-Action Report right now. Please retry in a moment.",
+                "تعذر إنشاء تقرير ما بعد الحدث حاليا. حاول مرة أخرى بعد قليل.",
               ),
             },
           ]);
@@ -194,7 +271,32 @@ export default function AdvancedSimulation() {
   }
 
   return (
-    <Layout className="py-6">
+    <Layout className="py-6 flex flex-col gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-6 gap-4">
+        <div className="glass-panel p-4 flex flex-col justify-center items-center border-l-4 border-l-primary bg-primary/5 relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-2 opacity-20"><Clock className="w-16 h-16" /></div>
+          <span className="text-xs text-primary font-display tracking-widest uppercase mb-1 z-10">
+            {text("Current Timeline", "التوقيت الحالي")}
+          </span>
+          <span className="text-3xl font-black font-display text-glow z-10">{timelineLabel}</span>
+        </div>
+
+        <div className="col-span-1 xl:col-span-5 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+          {METRIC_CONFIG.map((metric) => {
+            const MetricIcon = metric.icon;
+            return (
+              <ScoreGauge
+                key={metric.key}
+                label={text(metric.labelEn, metric.labelAr)}
+                value={state.scores[metric.key]}
+                icon={<MetricIcon className="w-4 h-4" />}
+                isArabic={isArabic}
+              />
+            );
+          })}
+        </div>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-[340px_minmax(0,1fr)] max-w-6xl mx-auto w-full">
         <aside className="glass-panel p-5 space-y-5">
           <div>
@@ -290,7 +392,7 @@ export default function AdvancedSimulation() {
                       isAssistant
                         ? "border-primary/20 bg-background/70 text-foreground"
                         : "border-primary/30 bg-primary/10 text-foreground"
-                    }`}
+                    } whitespace-pre-line`}
                   >
                     {!isAssistant && <User className="w-4 h-4 text-primary mb-1" />}
                     {message.content}
@@ -317,12 +419,23 @@ export default function AdvancedSimulation() {
               )}
             />
             <div className="flex justify-end">
-              <CyberButton onClick={handleSend} disabled={!draft.trim() || chatTurn.isPending}>
+              <div className="flex gap-3">
+                <CyberButton
+                  variant="secondary"
+                  onClick={handleCloseIncidentAndDebrief}
+                  disabled={!hasUserDirective || chatTurn.isPending || debrief.isPending}
+                >
+                  {debrief.isPending
+                    ? text("Generating AAR...", "جار إعداد تقرير ما بعد الحدث...")
+                    : text("Close Incident & AAR", "إغلاق الحادثة وتقرير ما بعد الحدث")}
+                </CyberButton>
+                <CyberButton onClick={handleSend} disabled={!draft.trim() || chatTurn.isPending || debrief.isPending}>
                 <Send className="w-4 h-4" />
                 {chatTurn.isPending
                   ? text("Analyzing...", "جار التحليل...")
                   : text("Send Command", "إرسال التوجيه")}
-              </CyberButton>
+                </CyberButton>
+              </div>
             </div>
           </div>
         </section>

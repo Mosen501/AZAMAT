@@ -106,11 +106,19 @@ export const runHistoryItemSchema = z.object({
 
 export type RunHistoryItem = z.infer<typeof runHistoryItemSchema>;
 
+export const advancedChatMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1).max(2000),
+});
+
+export type AdvancedChatMessage = z.infer<typeof advancedChatMessageSchema>;
+
 export const debriefRequestSchema = z.object({
   scenarioId: z.string(),
   language: languageSchema.optional().default("ar"),
   role: z.string(),
-  history: z.array(runHistoryItemSchema)
+  history: z.array(runHistoryItemSchema),
+  chatHistory: z.array(advancedChatMessageSchema).max(24).optional(),
 });
 
 export type DebriefRequest = z.infer<typeof debriefRequestSchema>;
@@ -125,18 +133,12 @@ export const debriefResponseSchema = z.object({
 
 export type DebriefResponse = z.infer<typeof debriefResponseSchema>;
 
-export const advancedChatMessageSchema = z.object({
-  role: z.enum(["user", "assistant"]),
-  content: z.string().min(1).max(2000),
-});
-
-export type AdvancedChatMessage = z.infer<typeof advancedChatMessageSchema>;
-
 export const advancedChatRequestSchema = z.object({
   scenarioId: z.string(),
   language: languageSchema.optional().default("ar"),
   sectorId: sectorIdSchema,
   role: z.string(),
+  currentScores: scoreSchema,
   responseRules: z.array(z.string().min(3).max(250)).min(3).max(20),
   history: z.array(advancedChatMessageSchema).min(1).max(24),
 });
@@ -145,6 +147,7 @@ export type AdvancedChatRequest = z.infer<typeof advancedChatRequestSchema>;
 
 export const advancedChatResponseSchema = z.object({
   assistantMessage: z.string(),
+  scoreDeltas: scoreSchema,
 });
 
 export type AdvancedChatResponse = z.infer<typeof advancedChatResponseSchema>;

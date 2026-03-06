@@ -51,12 +51,35 @@ function metricLabel(metricKey: MetricKey, language: Language): string {
 
 function buildDecisionInsights(history: RunHistoryItem[], scenario: Scenario): DecisionInsight[] {
   return history
-    .map((item) => {
+    .map((item, index) => {
       const step = scenario.steps[item.stepId];
       const choice = step?.choices.find((candidate) => candidate.id === item.choiceId);
+      const previousScores = index > 0 ? history[index - 1].scoresAfter : scenario.initialScores;
+      const derivedDeltas: ScoreSet = {
+        operationalControl: item.scoresAfter.operationalControl - previousScores.operationalControl,
+        responseTempo: item.scoresAfter.responseTempo - previousScores.responseTempo,
+        stakeholderTrust: item.scoresAfter.stakeholderTrust - previousScores.stakeholderTrust,
+        teamAlignment: item.scoresAfter.teamAlignment - previousScores.teamAlignment,
+        executiveComms: item.scoresAfter.executiveComms - previousScores.executiveComms,
+      };
 
       if (!step || !choice) {
-        return null;
+        const totalDelta =
+          derivedDeltas.operationalControl +
+          derivedDeltas.responseTempo +
+          derivedDeltas.stakeholderTrust +
+          derivedDeltas.teamAlignment +
+          derivedDeltas.executiveComms;
+        const turnNumber = index + 1;
+        return {
+          stepId: item.stepId,
+          stepTimeLabel: `T+${turnNumber * 5}m`,
+          stepDescription: `Advanced simulation turn ${turnNumber}`,
+          choiceId: item.choiceId,
+          choiceText: item.choiceId.replace(/[-_]/g, " "),
+          scoreDeltas: derivedDeltas,
+          totalDelta,
+        };
       }
 
       const totalDelta =
@@ -72,7 +95,7 @@ function buildDecisionInsights(history: RunHistoryItem[], scenario: Scenario): D
         stepDescription: step.description,
         choiceId: choice.id,
         choiceText: choice.text,
-        scoreDeltas: choice.scoreDeltas,
+        scoreDeltas: choice.scoreDeltas ?? derivedDeltas,
         totalDelta,
       };
     })
@@ -404,16 +427,61 @@ function localizeSectorLabel(sectorId: z.infer<typeof api.advanced.chat.input>["
   return language === "ar" ? entry.ar : entry.en;
 }
 
+function normalizeAdvancedScoreDeltas(raw: unknown): ScoreSet {
+  const source =
+    raw && typeof raw === "object"
+      ? (raw as Record<string, unknown>)
+      : {};
+  const clampDelta = (value: unknown): number => {
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      return 0;
+    }
+    const rounded = Math.round(value);
+    return Math.max(-12, Math.min(12, rounded));
+  };
+
+  return {
+    operationalControl: clampDelta(source.operationalControl),
+    responseTempo: clampDelta(source.responseTempo),
+    stakeholderTrust: clampDelta(source.stakeholderTrust),
+    teamAlignment: clampDelta(source.teamAlignment),
+    executiveComms: clampDelta(source.executiveComms),
+  };
+}
+
 function buildAdvancedFallback(
   input: z.infer<typeof api.advanced.chat.input>,
-): string {
+): { assistantMessage: string; scoreDeltas: ScoreSet } {
   const lastUserMessage = [...input.history].reverse().find((entry) => entry.role === "user");
+  const scoreDeltas: ScoreSet = {
+    operationalControl: 0,
+    responseTempo: 0,
+    stakeholderTrust: 0,
+    teamAlignment: 0,
+    executiveComms: 0,
+  };
 
   if (input.language === "en") {
-    return `AI live analysis is unavailable right now. Continue as ${input.role}. Prioritize one immediate action, one coordination action, and one public communication action. Then report your expected tradeoffs and timing. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".`;
+    return {
+      assistantMessage: `Update:
+AI live analysis is unavailable right now. Continue as ${input.role}. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
+Assessment:
+Operate in manual mode: assign one incident owner, one coordination owner, and one public-information owner before the next move.
+Question:
+What is your next immediate coordination step in the next 10 minutes?`,
+      scoreDeltas,
+    };
   }
 
-  return `التحليل الذكي المباشر غير متاح حاليا. واصل بدور ${localizeRoleLabel(input.role, "ar")}. حدّد إجراء فوريا واحدا، وإجراء تنسيق واحدا، وإجراء اتصال عام واحدا، ثم وضّح المفاضلات والتوقيت المتوقع لكل إجراء. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".`;
+  return {
+    assistantMessage: `تحديث:
+التحليل الذكي المباشر غير متاح حاليا. واصل بدور ${localizeRoleLabel(input.role, "ar")}. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
+تقييم:
+اعمل بوضع يدوي: عيّن مسؤولا للحادثة ومسؤولا للتنسيق ومسؤولا للاتصال العام قبل الخطوة التالية.
+سؤال:
+ما هي خطوة التنسيق الفورية التي ستنفذها خلال الدقائق العشر القادمة؟`,
+    scoreDeltas,
+  };
 }
 
 function truncateWords(text: string, maxWords: number): string {
@@ -433,31 +501,64 @@ function normalizeAdvancedTurnResponse(raw: string, language: Language): string 
     language === "ar"
       ? { update: "تحديث", assessment: "تقييم", question: "سؤال" }
       : { update: "Update", assessment: "Assessment", question: "Question" };
+  const aliases = {
+    update: language === "ar" ? ["تحديث", "Update"] : ["Update", "تحديث"],
+    assessment: language === "ar" ? ["تقييم", "Assessment"] : ["Assessment", "تقييم"],
+    question: language === "ar" ? ["سؤال", "Question"] : ["Question", "سؤال"],
+  };
 
   const lines = raw
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .map((line) => line.trim());
+  const nonEmptyLines = lines.filter(Boolean);
 
-  const readLabeledLine = (label: string): string | null => {
-    const matched = lines.find((line) => {
-      if (language === "en") {
-        return line.toLowerCase().startsWith(`${label.toLowerCase()}:`);
+  const allAliases = [...aliases.update, ...aliases.assessment, ...aliases.question];
+  const isHeaderLine = (line: string): boolean =>
+    allAliases.some((alias) => line.toLowerCase().startsWith(`${alias.toLowerCase()}:`));
+
+  const readSection = (sectionAliases: string[]): string | null => {
+    for (let index = 0; index < lines.length; index += 1) {
+      const currentLine = lines[index];
+      const matchedAlias = sectionAliases.find((alias) =>
+        currentLine.toLowerCase().startsWith(`${alias.toLowerCase()}:`),
+      );
+      if (!matchedAlias) {
+        continue;
       }
-      return line.startsWith(`${label}:`);
-    });
-    if (!matched) {
+
+      const afterColon = currentLine.slice(currentLine.indexOf(":") + 1).trim();
+      if (afterColon) {
+        return afterColon;
+      }
+
+      const sectionBody: string[] = [];
+      for (let innerIndex = index + 1; innerIndex < lines.length; innerIndex += 1) {
+        const candidate = lines[innerIndex];
+        if (!candidate) {
+          continue;
+        }
+        if (isHeaderLine(candidate)) {
+          break;
+        }
+        sectionBody.push(candidate);
+      }
+
+      if (sectionBody.length > 0) {
+        return sectionBody.join(" ");
+      }
       return null;
     }
-    return matched.slice(matched.indexOf(":") + 1).trim();
+
+    return null;
   };
 
-  let update = readLabeledLine(labels.update);
-  let assessment = readLabeledLine(labels.assessment);
-  let question = readLabeledLine(labels.question);
+  let update = readSection(aliases.update);
+  let assessment = readSection(aliases.assessment);
+  let question = readSection(aliases.question);
 
   if (!update || !assessment || !question) {
-    const sentences = raw
+    const sentences = nonEmptyLines
+      .join(" ")
       .replace(/\s+/g, " ")
       .split(/(?<=[.!؟])\s+/)
       .map((sentence) => sentence.trim())
@@ -484,7 +585,7 @@ function normalizeAdvancedTurnResponse(raw: string, language: Language): string 
     question = `${question.replace(/[.]+$/, "")}؟`;
   }
 
-  return `${labels.update}: ${update}\n${labels.assessment}: ${assessment}\n${labels.question}: ${question}`;
+  return `${labels.update}:\n${update}\n${labels.assessment}:\n${assessment}\n${labels.question}:\n${question}`;
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -955,6 +1056,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const localizedRole = localizeRoleLabel(parsedInput.role, parsedInput.language);
       const localizedSector = localizeSectorLabel(parsedInput.sectorId, parsedInput.language);
       const responseRules = parsedInput.responseRules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
+      const currentScoresContext = METRIC_DEFS.map((metric) =>
+        `${parsedInput.language === "ar" ? metric.ar : metric.en}: ${parsedInput.currentScores[metric.key]}/100`,
+      ).join("\n");
       const transcript = parsedInput.history
         .slice(-16)
         .map((entry) =>
@@ -981,15 +1085,32 @@ ${responseRules}
 سجل المحادثة:
 ${transcript}
 
-قدّم الرسالة التالية للمحاكاة بشكل واقعي ومباشر باللغة العربية.
-أعد بالضبط 3 أسطر قصيرة وبهذا التنسيق فقط:
-تحديث: <جملة أو جملتان كحد أقصى>
-تقييم: <جملة أو جملتان كحد أقصى>
-سؤال: <سؤال تنفيذي واحد واضح>
+وضع المؤشرات الحالي:
+${currentScoresContext}
+
+قدّم الجولة التالية بصيغة JSON صالحة فقط وبهذا الشكل:
+{
+  "update": "جملة أو جملتان عن تحديث ميداني جديد",
+  "assessment": "جملة أو جملتان لتقييم القرار السابق بشكل مباشر",
+  "question": "سؤال تنفيذي واحد واضح",
+  "scoreDeltas": {
+    "operationalControl": 0,
+    "responseTempo": 0,
+    "stakeholderTrust": 0,
+    "teamAlignment": 0,
+    "executiveComms": 0
+  }
+}
+
+قواعد الأوزان:
+- scoreDeltas تمثل أثر توجيه المتدرب الأخير بعد التقييم الميداني.
+- كل قيمة عدد صحيح بين -12 و +12.
+- اجعل الأوزان واقعية ومتوازنة، ولا تجعل كل القيم صفرا إلا إذا كان القرار محايدا فعلا.
+- القيّم المفاضلات بوضوح: قد يتحسن مؤشر مقابل تراجع آخر.
+
 القيود:
-- إجمالي الرسالة لا يتجاوز 120 كلمة.
-- لا تستخدم تعدادا رقميا أو نقطيا.
-- لا تستخدم Markdown أو JSON.
+- update + assessment + question لا تتجاوز 120 كلمة إجمالا.
+- لا تستخدم Markdown أو أي نص خارج JSON.
 - لا تكرر نص السيناريو أو القواعد حرفيا.`
           : `
 You are an interactive crisis simulation engine for the ${localizedSector} sector.
@@ -1002,14 +1123,32 @@ ${responseRules}
 Conversation transcript:
 ${transcript}
 
-Provide the next simulation turn in direct professional English.
-Return exactly 3 short lines in this format only:
-Update: <max 1-2 sentences>
-Assessment: <max 1-2 sentences>
-Question: <one execution-focused question>
+Current score state:
+${currentScoresContext}
+
+Provide the next turn as valid JSON only using this exact shape:
+{
+  "update": "1-2 sentence field update",
+  "assessment": "1-2 sentence critique of the trainee's previous directive",
+  "question": "one execution-focused question",
+  "scoreDeltas": {
+    "operationalControl": 0,
+    "responseTempo": 0,
+    "stakeholderTrust": 0,
+    "teamAlignment": 0,
+    "executiveComms": 0
+  }
+}
+
+Scoring rules:
+- scoreDeltas are the dynamic impact of the trainee's latest directive after this field update.
+- Each delta must be an integer between -12 and +12.
+- Keep scoring realistic and mixed; avoid all zeros unless the directive was genuinely neutral.
+- Reflect tradeoffs (some metrics can improve while others worsen).
+
 Constraints:
-- Total output must be under 110 words.
-- No bullets, numbering, markdown, or JSON.
+- update + assessment + question must stay under 110 words total.
+- No markdown or prose outside JSON.
 - Do not repeat scenario/rules verbatim.`;
 
       const aiResponse = await openai.chat.completions.create({
@@ -1019,26 +1158,42 @@ Constraints:
             role: "system",
             content:
               parsedInput.language === "ar"
-                ? "أنت محاكي أزمات تدريبي. التزم بإيجاز شديد في 3 أسطر فقط: تحديث، تقييم، سؤال."
-                : "You are a crisis simulation trainer. Be concise and output exactly 3 lines: Update, Assessment, Question.",
+                ? "أنت محاكي أزمات تدريبي. أعد JSON صالحا فقط. قيّم القرار السابق وولّد أوزان مؤشرات واقعية قابلة للتنفيذ."
+                : "You are a crisis simulation trainer. Return valid JSON only and assign realistic metric deltas.",
           },
           { role: "user", content: prompt },
         ],
-        max_completion_tokens: 220,
+        response_format: { type: "json_object" },
+        max_completion_tokens: 320,
       });
 
-      const assistantMessageRaw = aiResponse.choices[0]?.message?.content?.trim();
-
-      if (!assistantMessageRaw) {
+      const assistantPayloadRaw = aiResponse.choices[0]?.message?.content?.trim();
+      if (!assistantPayloadRaw) {
         throw new Error("Empty assistant response.");
       }
+      const parsedPayload = JSON.parse(assistantPayloadRaw) as {
+        assistantMessage?: unknown;
+        update?: unknown;
+        assessment?: unknown;
+        question?: unknown;
+        scoreDeltas?: unknown;
+      };
+      const rawAssistantMessage =
+        typeof parsedPayload.assistantMessage === "string"
+          ? parsedPayload.assistantMessage
+          : [
+              `${parsedInput.language === "ar" ? "تحديث" : "Update"}: ${typeof parsedPayload.update === "string" ? parsedPayload.update : ""}`,
+              `${parsedInput.language === "ar" ? "تقييم" : "Assessment"}: ${typeof parsedPayload.assessment === "string" ? parsedPayload.assessment : ""}`,
+              `${parsedInput.language === "ar" ? "سؤال" : "Question"}: ${typeof parsedPayload.question === "string" ? parsedPayload.question : ""}`,
+            ].join("\n");
 
       const assistantMessage = normalizeAdvancedTurnResponse(
-        assistantMessageRaw,
+        rawAssistantMessage,
         parsedInput.language,
       );
+      const scoreDeltas = normalizeAdvancedScoreDeltas(parsedPayload.scoreDeltas);
 
-      res.json({ assistantMessage });
+      res.json({ assistantMessage, scoreDeltas });
     } catch (error) {
       if (error instanceof z.ZodError) {
         res.status(400).json({ message: error.errors[0]?.message || "Validation Error" });
@@ -1048,7 +1203,7 @@ Constraints:
       console.error("Advanced chat error:", error);
 
       if (input) {
-        res.json({ assistantMessage: buildAdvancedFallback(input) });
+        res.json(buildAdvancedFallback(input));
         return;
       }
 
@@ -1091,6 +1246,22 @@ Constraints:
           return `- ${insight.stepTimeLabel}: "${insight.choiceText}" | Decision impact: ${deltaContext}`;
         })
         .join("\n");
+      const chatHistoryContext = (input.chatHistory ?? [])
+        .map((entry) => {
+          if (requestLanguage === "ar") {
+            return `- ${entry.role === "assistant" ? "المحاكي" : "المتدرب"}: ${entry.content}`;
+          }
+          return `- ${entry.role === "assistant" ? "Simulator" : "Trainee"}: ${entry.content}`;
+        })
+        .join("\n");
+      const safeHistoryContext = historyContext || (requestLanguage === "ar"
+        ? "- لا توجد قرارات اختيار متعدد مسجلة لهذه الجولة."
+        : "- No structured multiple-choice decisions were recorded for this run.");
+      const chatHistoryBlock = chatHistoryContext
+        ? requestLanguage === "ar"
+          ? `\nسجل المحادثة المتقدمة:\n${chatHistoryContext}\n`
+          : `\nAdvanced chat transcript:\n${chatHistoryContext}\n`
+        : "";
 
       const prompt =
         requestLanguage === "ar"
@@ -1103,7 +1274,8 @@ Constraints:
 ${scoreContext}
 
 سجل قراراته:
-${historyContext}
+${safeHistoryContext}
+${chatHistoryBlock}
 
 أنشئ تقرير ما بعد الحدث بصيغة JSON وباللغة العربية فقط، ويجب أن يطابق هذا الهيكل تماما:
 {
@@ -1124,7 +1296,8 @@ Final metric outcomes:
 ${scoreContext}
 
 Their decision history:
-${historyContext}
+${safeHistoryContext}
+${chatHistoryBlock}
 
 Generate an After-Action Report in JSON, in English only, matching this structure exactly:
 {

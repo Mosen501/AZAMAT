@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { type RunHistoryItem, type ScoreSet, type SectorId, type SimulationLevel } from "@shared/schema";
+import {
+  type AdvancedChatMessage,
+  type DebriefResponse,
+  type RunHistoryItem,
+  type ScoreSet,
+  type SectorId,
+  type SimulationLevel,
+} from "@shared/schema";
 import { DEFAULT_SCORES } from "@/lib/metric-config";
 
 export interface SimulationState {
@@ -9,6 +16,8 @@ export interface SimulationState {
   scenarioId: string | null;
   scores: ScoreSet;
   history: RunHistoryItem[];
+  advancedChatHistory: AdvancedChatMessage[];
+  preloadedDebrief: DebriefResponse | null;
 }
 
 const DEFAULT_STATE: SimulationState = {
@@ -17,13 +26,17 @@ const DEFAULT_STATE: SimulationState = {
   role: null,
   scenarioId: null,
   scores: { ...DEFAULT_SCORES },
-  history: []
+  history: [],
+  advancedChatHistory: [],
+  preloadedDebrief: null,
 };
 
 let simulationState: SimulationState = {
   ...DEFAULT_STATE,
   scores: { ...DEFAULT_SCORES },
   history: [],
+  advancedChatHistory: [],
+  preloadedDebrief: null,
 };
 const listeners = new Set<(state: SimulationState) => void>();
 
@@ -71,7 +84,13 @@ export function useSimulation() {
   };
 
   const initScores = (scores: ScoreSet) => {
-    emitState({ ...simulationState, scores: normalizeScores(scores), history: [] });
+    emitState({
+      ...simulationState,
+      scores: normalizeScores(scores),
+      history: [],
+      advancedChatHistory: [],
+      preloadedDebrief: null,
+    });
   };
 
   const recordChoice = (
@@ -98,7 +117,23 @@ export function useSimulation() {
     emitState({
       ...simulationState,
       scores: newScores,
-      history: [...simulationState.history, historyItem]
+      history: [...simulationState.history, historyItem],
+      preloadedDebrief: null,
+    });
+  };
+
+  const setAdvancedChatHistory = (advancedChatHistory: AdvancedChatMessage[]) => {
+    emitState({
+      ...simulationState,
+      advancedChatHistory,
+      preloadedDebrief: null,
+    });
+  };
+
+  const setPreloadedDebrief = (preloadedDebrief: DebriefResponse | null) => {
+    emitState({
+      ...simulationState,
+      preloadedDebrief,
     });
   };
 
@@ -107,6 +142,8 @@ export function useSimulation() {
       ...DEFAULT_STATE,
       scores: { ...DEFAULT_SCORES },
       history: [],
+      advancedChatHistory: [],
+      preloadedDebrief: null,
     });
   };
 
@@ -115,6 +152,8 @@ export function useSimulation() {
       ...simulationState,
       scores: { ...DEFAULT_SCORES },
       history: [],
+      advancedChatHistory: [],
+      preloadedDebrief: null,
     });
   };
 
@@ -126,6 +165,8 @@ export function useSimulation() {
     setScenario,
     initScores,
     recordChoice,
+    setAdvancedChatHistory,
+    setPreloadedDebrief,
     restartRun,
     resetSimulation
   };
