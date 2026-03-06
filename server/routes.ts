@@ -416,6 +416,77 @@ function buildAdvancedFallback(
   return `التحليل الذكي المباشر غير متاح حاليا. واصل بدور ${localizeRoleLabel(input.role, "ar")}. حدّد إجراء فوريا واحدا، وإجراء تنسيق واحدا، وإجراء اتصال عام واحدا، ثم وضّح المفاضلات والتوقيت المتوقع لكل إجراء. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".`;
 }
 
+function truncateWords(text: string, maxWords: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return normalized;
+  }
+  const words = normalized.split(" ");
+  if (words.length <= maxWords) {
+    return normalized;
+  }
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function normalizeAdvancedTurnResponse(raw: string, language: Language): string {
+  const labels =
+    language === "ar"
+      ? { update: "تحديث", assessment: "تقييم", question: "سؤال" }
+      : { update: "Update", assessment: "Assessment", question: "Question" };
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const readLabeledLine = (label: string): string | null => {
+    const matched = lines.find((line) => {
+      if (language === "en") {
+        return line.toLowerCase().startsWith(`${label.toLowerCase()}:`);
+      }
+      return line.startsWith(`${label}:`);
+    });
+    if (!matched) {
+      return null;
+    }
+    return matched.slice(matched.indexOf(":") + 1).trim();
+  };
+
+  let update = readLabeledLine(labels.update);
+  let assessment = readLabeledLine(labels.assessment);
+  let question = readLabeledLine(labels.question);
+
+  if (!update || !assessment || !question) {
+    const sentences = raw
+      .replace(/\s+/g, " ")
+      .split(/(?<=[.!؟])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+
+    update = update ?? sentences[0] ?? "";
+    assessment = assessment ?? sentences[1] ?? sentences[0] ?? "";
+    question =
+      question ??
+      sentences.find((sentence) => sentence.includes("?") || sentence.includes("؟")) ??
+      sentences[2] ??
+      (language === "ar" ? "ما القرار التنفيذي التالي الذي ستعتمده الآن؟" : "What is your next execution decision now?");
+  }
+
+  const lineWordLimit = language === "ar" ? 28 : 24;
+  update = truncateWords(update, lineWordLimit);
+  assessment = truncateWords(assessment, lineWordLimit);
+  question = truncateWords(question, lineWordLimit);
+
+  if (language === "en" && !question.endsWith("?")) {
+    question = `${question.replace(/[.]+$/, "")}?`;
+  }
+  if (language === "ar" && !question.endsWith("؟")) {
+    question = `${question.replace(/[.]+$/, "")}؟`;
+  }
+
+  return `${labels.update}: ${update}\n${labels.assessment}: ${assessment}\n${labels.question}: ${question}`;
+}
+
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.get(api.activity.recent.path, async (req, res) => {
     try {
@@ -911,11 +982,15 @@ ${responseRules}
 ${transcript}
 
 قدّم الرسالة التالية للمحاكاة بشكل واقعي ومباشر باللغة العربية.
-المطلوب في الرسالة:
-1) تحديث ميداني جديد يزيد الضغط التشغيلي.
-2) تقييم سريع للقرار السابق (ما الذي كان صحيحا وما المخاطر المتبقية).
-3) سؤال تنفيذي واضح يدفع المتدرب لاتخاذ قرار تالٍ.
-لا تستخدم Markdown أو JSON.`
+أعد بالضبط 3 أسطر قصيرة وبهذا التنسيق فقط:
+تحديث: <جملة أو جملتان كحد أقصى>
+تقييم: <جملة أو جملتان كحد أقصى>
+سؤال: <سؤال تنفيذي واحد واضح>
+القيود:
+- إجمالي الرسالة لا يتجاوز 120 كلمة.
+- لا تستخدم تعدادا رقميا أو نقطيا.
+- لا تستخدم Markdown أو JSON.
+- لا تكرر نص السيناريو أو القواعد حرفيا.`
           : `
 You are an interactive crisis simulation engine for the ${localizedSector} sector.
 Current trainee role: ${localizedRole}.
@@ -928,11 +1003,14 @@ Conversation transcript:
 ${transcript}
 
 Provide the next simulation turn in direct professional English.
-Your response must include:
-1) A realistic field update that increases operational pressure.
-2) A short critique of the previous decision (what worked, what remains risky).
-3) One execution-focused question that forces the next decision.
-Do not use markdown or JSON.`;
+Return exactly 3 short lines in this format only:
+Update: <max 1-2 sentences>
+Assessment: <max 1-2 sentences>
+Question: <one execution-focused question>
+Constraints:
+- Total output must be under 110 words.
+- No bullets, numbering, markdown, or JSON.
+- Do not repeat scenario/rules verbatim.`;
 
       const aiResponse = await openai.chat.completions.create({
         model: "gpt-5.1",
@@ -941,18 +1019,24 @@ Do not use markdown or JSON.`;
             role: "system",
             content:
               parsedInput.language === "ar"
-                ? "أنت محاكي أزمات تدريبي. كن عمليًا ومحددًا وركز على القرار التنفيذي التالي."
-                : "You are a crisis simulation trainer. Be concrete, realistic, and decision-focused.",
+                ? "أنت محاكي أزمات تدريبي. التزم بإيجاز شديد في 3 أسطر فقط: تحديث، تقييم، سؤال."
+                : "You are a crisis simulation trainer. Be concise and output exactly 3 lines: Update, Assessment, Question.",
           },
           { role: "user", content: prompt },
         ],
+        max_completion_tokens: 220,
       });
 
-      const assistantMessage = aiResponse.choices[0]?.message?.content?.trim();
+      const assistantMessageRaw = aiResponse.choices[0]?.message?.content?.trim();
 
-      if (!assistantMessage) {
+      if (!assistantMessageRaw) {
         throw new Error("Empty assistant response.");
       }
+
+      const assistantMessage = normalizeAdvancedTurnResponse(
+        assistantMessageRaw,
+        parsedInput.language,
+      );
 
       res.json({ assistantMessage });
     } catch (error) {
