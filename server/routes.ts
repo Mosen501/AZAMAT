@@ -449,54 +449,194 @@ function normalizeAdvancedScoreDeltas(raw: unknown): ScoreSet {
   };
 }
 
+function applyScoreDeltas(current: ScoreSet, deltas: ScoreSet): ScoreSet {
+  const clampScore = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));
+
+  return {
+    operationalControl: clampScore(current.operationalControl + deltas.operationalControl),
+    responseTempo: clampScore(current.responseTempo + deltas.responseTempo),
+    stakeholderTrust: clampScore(current.stakeholderTrust + deltas.stakeholderTrust),
+    teamAlignment: clampScore(current.teamAlignment + deltas.teamAlignment),
+    executiveComms: clampScore(current.executiveComms + deltas.executiveComms),
+  };
+}
+
+function isBinaryReply(raw: string | undefined, language: Language): boolean {
+  if (!raw) {
+    return false;
+  }
+
+  const normalized = raw.trim().toLowerCase().replace(/[.!?؟،,:;"'`]/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  const englishBinary = new Set(["yes", "no", "y", "n", "ok", "okay", "sure", "done"]);
+  const arabicBinary = new Set(["نعم", "لا", "اي", "أجل", "اجل", "موافق", "تم"]);
+  const words = normalized.split(/\s+/);
+
+  if (words.length > 2) {
+    return false;
+  }
+
+  if (language === "ar") {
+    return words.every((word) => arabicBinary.has(word));
+  }
+
+  return words.every((word) => englishBinary.has(word));
+}
+
+function enforceDeltaTension(deltas: ScoreSet, binaryReply: boolean): ScoreSet {
+  const next = { ...deltas };
+  const values = Object.values(next);
+  const hasPositive = values.some((value) => value > 0);
+  const hasNegative = values.some((value) => value < 0);
+
+  if (binaryReply) {
+    (Object.keys(next) as MetricKey[]).forEach((key) => {
+      if (next[key] > 0) {
+        next[key] = 0;
+      }
+    });
+    if ((Object.values(next) as number[]).every((value) => value === 0)) {
+      next.responseTempo = -3;
+      next.teamAlignment = -2;
+    }
+    return next;
+  }
+
+  if (!hasPositive && !hasNegative) {
+    next.operationalControl = 2;
+    next.stakeholderTrust = -2;
+    return next;
+  }
+
+  if (!hasPositive) {
+    next.operationalControl = 1;
+  }
+
+  if (!hasNegative) {
+    next.stakeholderTrust = -1;
+  }
+
+  return next;
+}
+
+function sanitizeAdvancedSection(text: string): string {
+  return text
+    .replace(/\.{3,}/g, ".")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildConcreteCommandQuestion(language: Language): string {
+  if (language === "ar") {
+    return "حدّد الآن أمرا تنفيذيا واضحا: من المسؤول، ما الإجراء الذي يبدأ خلال 10 دقائق، متى نقطة التحقق التالية، وما مؤشر الأداء المستهدف قبل تلك النقطة؟";
+  }
+  return "State the command now: who owns execution, what exact action starts within 10 minutes, when the next checkpoint is, and which KPI target must be reached by then?";
+}
+
+function enforceConcreteCommandQuestion(
+  question: string,
+  language: Language,
+  forceConcrete: boolean,
+): string {
+  const cleaned = sanitizeAdvancedSection(question);
+  const yesNoPattern = language === "ar"
+    ? /^هل\b/
+    : /^(do|would|will|can|could|should|is|are)\b/i;
+
+  if (forceConcrete || !cleaned || yesNoPattern.test(cleaned)) {
+    return buildConcreteCommandQuestion(language);
+  }
+
+  return cleaned;
+}
+
+function buildImpactReason(deltas: ScoreSet, language: Language): string {
+  const positives = METRIC_DEFS
+    .map((metric) => ({ key: metric.key, value: deltas[metric.key] }))
+    .filter((entry) => entry.value > 0)
+    .sort((left, right) => right.value - left.value);
+  const negatives = METRIC_DEFS
+    .map((metric) => ({ key: metric.key, value: deltas[metric.key] }))
+    .filter((entry) => entry.value < 0)
+    .sort((left, right) => left.value - right.value);
+
+  const topPositive = positives[0];
+  const topNegative = negatives[0];
+
+  if (language === "ar") {
+    if (topPositive && topNegative) {
+      return `تحسن ${metricLabel(topPositive.key, "ar")} (+${topPositive.value}) نتيجة وضوح التوجيه، لكن ${metricLabel(topNegative.key, "ar")} (${topNegative.value}) تراجع بسبب كلفة التنسيق والاتصال.`;
+    }
+    if (topPositive) {
+      return `الأثر الإيجابي الأبرز كان على ${metricLabel(topPositive.key, "ar")} (+${topPositive.value}) مع تأثيرات جانبية محدودة.`;
+    }
+    if (topNegative) {
+      return `الأثر السلبي الأبرز كان على ${metricLabel(topNegative.key, "ar")} (${topNegative.value}) بسبب غياب تفاصيل تنفيذية كافية.`;
+    }
+    return "الأثر التشغيلي محدود في هذه الجولة، لأن القرار لم يضف تفاصيل تنفيذية قابلة للقياس.";
+  }
+
+  if (topPositive && topNegative) {
+    return `${metricLabel(topPositive.key, "en")} improved (+${topPositive.value}) from clearer execution focus, but ${metricLabel(topNegative.key, "en")} dropped (${topNegative.value}) due to coordination/communication cost.`;
+  }
+  if (topPositive) {
+    return `Primary gain was in ${metricLabel(topPositive.key, "en")} (+${topPositive.value}) with limited side effects.`;
+  }
+  if (topNegative) {
+    return `Primary loss was in ${metricLabel(topNegative.key, "en")} (${topNegative.value}) due to missing execution detail.`;
+  }
+  return "Operational impact stayed limited this turn because the directive lacked measurable execution detail.";
+}
+
 function buildAdvancedFallback(
   input: z.infer<typeof api.advanced.chat.input>,
-): { assistantMessage: string; scoreDeltas: ScoreSet } {
+): { assistantMessage: string; scoreDeltas: ScoreSet; updatedScores: ScoreSet; impactReason: string } {
   const lastUserMessage = [...input.history].reverse().find((entry) => entry.role === "user");
   const scoreDeltas: ScoreSet = {
     operationalControl: 0,
-    responseTempo: 0,
-    stakeholderTrust: 0,
-    teamAlignment: 0,
+    responseTempo: -2,
+    stakeholderTrust: -1,
+    teamAlignment: -2,
     executiveComms: 0,
   };
+  const updatedScores = applyScoreDeltas(input.currentScores, scoreDeltas);
+  const impactReason = buildImpactReason(scoreDeltas, input.language);
 
   if (input.language === "en") {
     return {
       assistantMessage: `Update:
-AI live analysis is unavailable right now. Continue as ${input.role}. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
+AI live analysis is unavailable right now. No new action was executed because the last directive lacks concrete who/what/when/KPI detail. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
 Assessment:
-Operate in manual mode: assign one incident owner, one coordination owner, and one public-information owner before the next move.
+Stay in manual mode and issue one executable command with owner, timing, and target KPI before the next move.
 Question:
-What is your next immediate coordination step in the next 10 minutes?`,
+State the command now: who owns execution, what exact action starts within 10 minutes, when the next checkpoint is, and which KPI target must be reached by then?`,
       scoreDeltas,
+      updatedScores,
+      impactReason,
     };
   }
 
   return {
     assistantMessage: `تحديث:
-التحليل الذكي المباشر غير متاح حاليا. واصل بدور ${localizeRoleLabel(input.role, "ar")}. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
+التحليل الذكي المباشر غير متاح حاليا. لم يُنفذ إجراء جديد لأن التوجيه الأخير يفتقد تفاصيل من/ماذا/متى/مؤشر. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
 تقييم:
-اعمل بوضع يدوي: عيّن مسؤولا للحادثة ومسؤولا للتنسيق ومسؤولا للاتصال العام قبل الخطوة التالية.
+اعمل بوضع يدوي وأصدر أمرا تنفيذيا واحدا يتضمن المالك الزمني ومؤشر أداء مستهدف قبل الخطوة التالية.
 سؤال:
-ما هي خطوة التنسيق الفورية التي ستنفذها خلال الدقائق العشر القادمة؟`,
+حدّد الآن أمرا تنفيذيا واضحا: من المسؤول، ما الإجراء الذي يبدأ خلال 10 دقائق، متى نقطة التحقق التالية، وما مؤشر الأداء المستهدف قبل تلك النقطة؟`,
     scoreDeltas,
+    updatedScores,
+    impactReason,
   };
 }
 
-function truncateWords(text: string, maxWords: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return normalized;
-  }
-  const words = normalized.split(" ");
-  if (words.length <= maxWords) {
-    return normalized;
-  }
-  return `${words.slice(0, maxWords).join(" ")}...`;
-}
-
-function normalizeAdvancedTurnResponse(raw: string, language: Language): string {
+function normalizeAdvancedTurnResponse(
+  raw: string,
+  language: Language,
+  forceConcreteQuestion = false,
+): string {
   const labels =
     language === "ar"
       ? { update: "تحديث", assessment: "تقييم", question: "سؤال" }
@@ -573,17 +713,9 @@ function normalizeAdvancedTurnResponse(raw: string, language: Language): string 
       (language === "ar" ? "ما القرار التنفيذي التالي الذي ستعتمده الآن؟" : "What is your next execution decision now?");
   }
 
-  const lineWordLimit = language === "ar" ? 28 : 24;
-  update = truncateWords(update, lineWordLimit);
-  assessment = truncateWords(assessment, lineWordLimit);
-  question = truncateWords(question, lineWordLimit);
-
-  if (language === "en" && !question.endsWith("?")) {
-    question = `${question.replace(/[.]+$/, "")}?`;
-  }
-  if (language === "ar" && !question.endsWith("؟")) {
-    question = `${question.replace(/[.]+$/, "")}؟`;
-  }
+  update = sanitizeAdvancedSection(update);
+  assessment = sanitizeAdvancedSection(assessment);
+  question = enforceConcreteCommandQuestion(question, language, forceConcreteQuestion);
 
   return `${labels.update}:\n${update}\n${labels.assessment}:\n${assessment}\n${labels.question}:\n${question}`;
 }
@@ -1055,10 +1187,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       );
       const localizedRole = localizeRoleLabel(parsedInput.role, parsedInput.language);
       const localizedSector = localizeSectorLabel(parsedInput.sectorId, parsedInput.language);
+      const lastUserMessage = [...parsedInput.history].reverse().find((entry) => entry.role === "user");
+      const binaryReply = isBinaryReply(lastUserMessage?.content, parsedInput.language);
       const responseRules = parsedInput.responseRules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
       const currentScoresContext = METRIC_DEFS.map((metric) =>
         `${parsedInput.language === "ar" ? metric.ar : metric.en}: ${parsedInput.currentScores[metric.key]}/100`,
       ).join("\n");
+      const weakestMetric = [...METRIC_DEFS]
+        .map((metric) => ({ key: metric.key, value: parsedInput.currentScores[metric.key] }))
+        .sort((left, right) => left.value - right.value)[0]?.key ?? "teamAlignment";
+      const branchFocus =
+        parsedInput.language === "ar"
+          ? (binaryReply
+            ? "فجوة تنفيذية: آخر رد كان نعم/لا دون تفاصيل تشغيلية."
+            : `بؤرة التشعب الحالية: عالج الضغط المتصاعد المرتبط بمؤشر ${metricLabel(weakestMetric, "ar")}.`)
+          : (binaryReply
+            ? "Execution gap branch: the latest trainee reply was yes/no without operational detail."
+            : `Current branch focus: escalate consequences around the weakest metric (${metricLabel(weakestMetric, "en")}).`);
       const transcript = parsedInput.history
         .slice(-16)
         .map((entry) =>
@@ -1088,11 +1233,21 @@ ${transcript}
 وضع المؤشرات الحالي:
 ${currentScoresContext}
 
+تعليمات التفاعل الإلزامية:
+- يجب أن يكون السؤال الأخير أمرا تنفيذيا ملموسا يتضمن: من/ماذا/متى/مؤشر KPI.
+- إذا كان رد المتدرب الأخير نعم/لا فقط، فلا تنتقل للأمام في القصة: اطلب تفاصيل تنفيذ محددة مباشرة.
+- أظهر أثرا واضحا لكل جولة عبر scoreDeltas مع مفاضلة حقيقية بين مؤشرات مختلفة.
+- اجعل التشعب مبنيا على القرارات السابقة، ولا تكرر نفس النمط السردي.
+
+إشارة التشعب الحالية:
+${branchFocus}
+
 قدّم الجولة التالية بصيغة JSON صالحة فقط وبهذا الشكل:
 {
   "update": "جملة أو جملتان عن تحديث ميداني جديد",
   "assessment": "جملة أو جملتان لتقييم القرار السابق بشكل مباشر",
-  "question": "سؤال تنفيذي واحد واضح",
+  "question": "سؤال تنفيذي واحد واضح بصيغة أمر عمليات (من/ماذا/متى/KPI)",
+  "impactReason": "سبب مختصر من جملة واحدة يبرر أثر المؤشرات في هذه الجولة",
   "scoreDeltas": {
     "operationalControl": 0,
     "responseTempo": 0,
@@ -1126,11 +1281,21 @@ ${transcript}
 Current score state:
 ${currentScoresContext}
 
+Mandatory interaction rules:
+- The final question must demand a concrete command with who/what/when/KPI.
+- If the trainee's latest reply is only yes/no, do not advance the storyline; request execution specifics first.
+- Every turn must include explicit score impact with real metric tradeoffs (not generic neutrality).
+- Branching must depend on prior decisions and avoid repeating the same narrative pattern.
+
+Current branch signal:
+${branchFocus}
+
 Provide the next turn as valid JSON only using this exact shape:
 {
   "update": "1-2 sentence field update",
   "assessment": "1-2 sentence critique of the trainee's previous directive",
-  "question": "one execution-focused question",
+  "question": "one execution command prompt requiring who/what/when/KPI",
+  "impactReason": "one short reason justifying this turn's metric impact",
   "scoreDeltas": {
     "operationalControl": 0,
     "responseTempo": 0,
@@ -1176,24 +1341,48 @@ Constraints:
         update?: unknown;
         assessment?: unknown;
         question?: unknown;
+        impactReason?: unknown;
         scoreDeltas?: unknown;
       };
-      const rawAssistantMessage =
-        typeof parsedPayload.assistantMessage === "string"
-          ? parsedPayload.assistantMessage
-          : [
-              `${parsedInput.language === "ar" ? "تحديث" : "Update"}: ${typeof parsedPayload.update === "string" ? parsedPayload.update : ""}`,
-              `${parsedInput.language === "ar" ? "تقييم" : "Assessment"}: ${typeof parsedPayload.assessment === "string" ? parsedPayload.assessment : ""}`,
-              `${parsedInput.language === "ar" ? "سؤال" : "Question"}: ${typeof parsedPayload.question === "string" ? parsedPayload.question : ""}`,
-            ].join("\n");
+      const rawAssistantMessage = typeof parsedPayload.assistantMessage === "string"
+        ? parsedPayload.assistantMessage
+        : [
+            `${parsedInput.language === "ar" ? "تحديث" : "Update"}: ${typeof parsedPayload.update === "string" ? parsedPayload.update : ""}`,
+            `${parsedInput.language === "ar" ? "تقييم" : "Assessment"}: ${typeof parsedPayload.assessment === "string" ? parsedPayload.assessment : ""}`,
+            `${parsedInput.language === "ar" ? "سؤال" : "Question"}: ${typeof parsedPayload.question === "string" ? parsedPayload.question : ""}`,
+          ].join("\n");
+
+      const guardedRawMessage = binaryReply
+        ? (parsedInput.language === "ar"
+          ? `تحديث:
+لم يتم اعتماد أي تنفيذ ميداني جديد لأن ردك الأخير كان نعم/لا بدون تفاصيل تشغيلية.
+تقييم:
+لا يمكن تحسين الأداء دون أمر تنفيذي واضح يحدد المالك والتوقيت ومؤشر القياس.
+سؤال:
+حدّد الآن أمرا تنفيذيا واضحا: من المسؤول، ما الإجراء الذي يبدأ خلال 10 دقائق، متى نقطة التحقق التالية، وما مؤشر الأداء المستهدف قبل تلك النقطة؟`
+          : `Update:
+No new field action was authorized because your last reply was yes/no without execution detail.
+Assessment:
+Performance cannot improve until you issue one concrete command with owner, timing, and measurable KPI.
+Question:
+State the command now: who owns execution, what exact action starts within 10 minutes, when the next checkpoint is, and which KPI target must be reached by then?`)
+        : rawAssistantMessage;
 
       const assistantMessage = normalizeAdvancedTurnResponse(
-        rawAssistantMessage,
+        guardedRawMessage,
         parsedInput.language,
+        binaryReply,
       );
-      const scoreDeltas = normalizeAdvancedScoreDeltas(parsedPayload.scoreDeltas);
+      const scoreDeltas = enforceDeltaTension(
+        normalizeAdvancedScoreDeltas(parsedPayload.scoreDeltas),
+        binaryReply,
+      );
+      const updatedScores = applyScoreDeltas(parsedInput.currentScores, scoreDeltas);
+      const impactReason = typeof parsedPayload.impactReason === "string" && parsedPayload.impactReason.trim()
+        ? sanitizeAdvancedSection(parsedPayload.impactReason)
+        : buildImpactReason(scoreDeltas, parsedInput.language);
 
-      res.json({ assistantMessage, scoreDeltas });
+      res.json({ assistantMessage, scoreDeltas, updatedScores, impactReason });
     } catch (error) {
       if (error instanceof z.ZodError) {
         res.status(400).json({ message: error.errors[0]?.message || "Validation Error" });

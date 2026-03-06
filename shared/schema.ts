@@ -148,6 +148,8 @@ export type AdvancedChatRequest = z.infer<typeof advancedChatRequestSchema>;
 export const advancedChatResponseSchema = z.object({
   assistantMessage: z.string(),
   scoreDeltas: scoreSchema,
+  updatedScores: scoreSchema,
+  impactReason: z.string(),
 });
 
 export type AdvancedChatResponse = z.infer<typeof advancedChatResponseSchema>;

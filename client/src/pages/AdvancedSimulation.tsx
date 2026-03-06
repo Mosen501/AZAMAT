@@ -13,8 +13,18 @@ import { getRulesForSelection } from "@/lib/training-config";
 import type { AdvancedChatMessage, RunHistoryItem, ScoreSet } from "@shared/schema";
 import { Bot, Send, User, AlertTriangle, Clock } from "lucide-react";
 
+interface TurnImpact {
+  scoreDeltas: ScoreSet;
+  updatedScores: ScoreSet;
+  reason: string;
+}
+
+interface ChatTurnMessage extends AdvancedChatMessage {
+  impact?: TurnImpact;
+}
+
 function buildRunHistoryFromAdvancedChat(
-  messages: AdvancedChatMessage[],
+  messages: ChatTurnMessage[],
   scores: ScoreSet,
 ): RunHistoryItem[] {
   const userMessages = messages.filter((message) => message.role === "user");
@@ -42,7 +52,7 @@ export default function AdvancedSimulation() {
   const chatTurn = useAdvancedChatTurn();
   const debrief = useGenerateDebrief();
   const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState<AdvancedChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatTurnMessage[]>([]);
   const [isOfflineFallbackMode, setIsOfflineFallbackMode] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -64,7 +74,11 @@ export default function AdvancedSimulation() {
   }, [messages]);
 
   useEffect(() => {
-    setAdvancedChatHistory(messages.slice(-24));
+    setAdvancedChatHistory(
+      messages
+        .slice(-24)
+        .map((message) => ({ role: message.role, content: message.content })),
+    );
   }, [messages, setAdvancedChatHistory]);
 
   const localizedScenario = scenario ? localizeScenario(scenario, isArabic) : null;
@@ -145,7 +159,10 @@ export default function AdvancedSimulation() {
     }
 
     const userMessage: AdvancedChatMessage = { role: "user", content };
-    const nextHistory = [...messages, userMessage].slice(-24);
+    const nextHistory = [
+      ...messages.map((message) => ({ role: message.role, content: message.content })),
+      userMessage,
+    ].slice(-24);
 
     setMessages((current) => [...current, userMessage]);
     setDraft("");
@@ -170,7 +187,15 @@ export default function AdvancedSimulation() {
           }
           setMessages((current) => [
             ...current,
-            { role: "assistant", content: response.assistantMessage },
+            {
+              role: "assistant",
+              content: response.assistantMessage,
+              impact: {
+                scoreDeltas: response.scoreDeltas,
+                updatedScores: response.updatedScores,
+                reason: response.impactReason,
+              },
+            },
           ]);
           const turnNumber = nextHistory.filter((entry) => entry.role === "user").length;
           recordChoice(
@@ -396,6 +421,36 @@ export default function AdvancedSimulation() {
                   >
                     {!isAssistant && <User className="w-4 h-4 text-primary mb-1" />}
                     {message.content}
+                    {isAssistant && message.impact && (
+                      <div className="mt-3 rounded border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
+                        <p className="mb-2 font-semibold text-primary">
+                          {text("Turn Impact", "أثر الجولة")}
+                        </p>
+                        <p className="mb-2 text-muted-foreground leading-5">
+                          {message.impact.reason}
+                        </p>
+                        <div className="space-y-1">
+                          {METRIC_CONFIG.map((metric) => {
+                            const delta = message.impact?.scoreDeltas[metric.key] ?? 0;
+                            const updated = message.impact?.updatedScores[metric.key] ?? state.scores[metric.key];
+                            const deltaText = `${delta >= 0 ? "+" : ""}${delta}`;
+                            return (
+                              <div
+                                key={`impact-${index}-${metric.key}`}
+                                className="flex items-center justify-between gap-3 text-[11px]"
+                              >
+                                <span className="text-muted-foreground">
+                                  {text(metric.labelEn, metric.labelAr)}
+                                </span>
+                                <span className="font-medium text-foreground">
+                                  {deltaText} | {updated}/100
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
