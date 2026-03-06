@@ -19,6 +19,9 @@ const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
+const ADVANCED_MODEL_PRIMARY = process.env.AI_INTEGRATIONS_ADVANCED_MODEL?.trim() || "gpt-5.1";
+const ADVANCED_MODEL_FALLBACK = process.env.AI_INTEGRATIONS_ADVANCED_FALLBACK_MODEL?.trim() || "";
+const DEBRIEF_MODEL = process.env.AI_INTEGRATIONS_DEBRIEF_MODEL?.trim() || ADVANCED_MODEL_PRIMARY;
 
 const METRIC_DEFS = [
   { key: "operationalControl", en: "operational control", ar: "التحكم التشغيلي" },
@@ -47,6 +50,28 @@ function metricLabel(metricKey: MetricKey, language: Language): string {
   }
 
   return language === "ar" ? metric.ar : metric.en;
+}
+
+function summarizeUpstreamError(error: unknown): {
+  status?: number;
+  code?: string;
+  type?: string;
+  message: string;
+} {
+  const candidate = error as {
+    status?: number;
+    code?: string;
+    type?: string;
+    error?: { message?: string };
+    message?: string;
+  };
+
+  return {
+    status: candidate?.status,
+    code: candidate?.code,
+    type: candidate?.type,
+    message: candidate?.error?.message || candidate?.message || "unknown upstream error",
+  };
 }
 
 function buildDecisionInsights(history: RunHistoryItem[], scenario: Scenario): DecisionInsight[] {
@@ -1726,14 +1751,18 @@ Constraints:
 - No markdown or prose outside JSON.
 - Do not repeat scenario/rules verbatim.`;
 
-      const requestModelTurn = async (strictRepair: boolean): Promise<string> => {
+      const modelCandidates = Array.from(
+        new Set([ADVANCED_MODEL_PRIMARY, ADVANCED_MODEL_FALLBACK].filter(Boolean)),
+      );
+
+      const requestModelTurn = async (model: string, strictRepair: boolean): Promise<string> => {
         const repairInstruction =
           parsedInput.language === "ar"
             ? "تصحيح التنسيق: أعد JSON صالحا فقط بالمفاتيح: update, assessment, question, impactReason, scoreDeltas. لا تضف أي نص خارج JSON."
             : "FORMAT CORRECTION: Return valid JSON only with keys update, assessment, question, impactReason, scoreDeltas. No prose outside JSON.";
 
         const aiResponse = await openai.chat.completions.create({
-          model: "gpt-5.1",
+          model,
           messages: [
             {
               role: "system",
@@ -1756,7 +1785,7 @@ Constraints:
         return raw;
       };
 
-      const requestModelTurnCompatibility = async (): Promise<string> => {
+      const requestModelTurnCompatibility = async (model: string): Promise<string> => {
         const lastDirective = extractDirectiveCandidate(lastUserMessage?.content);
         const weakestMetricForRetry = [...METRIC_DEFS]
           .map((metric) => ({ key: metric.key, value: parsedInput.currentScores[metric.key] }))
@@ -1779,7 +1808,7 @@ scoreDeltas must be integers in [-12, 12] with realistic tradeoffs.
             `;
 
         const aiResponse = await openai.chat.completions.create({
-          model: "gpt-5.1",
+          model,
           messages: [
             {
               role: "system",
@@ -1800,43 +1829,58 @@ scoreDeltas must be integers in [-12, 12] with realistic tradeoffs.
         return raw;
       };
 
-      let parsedTurn: ParsedAdvancedTurnPayload | null = null;
-
-      try {
-        const firstRawResponse = await requestModelTurn(false);
-        parsedTurn = parseAdvancedTurnPayload(firstRawResponse, parsedInput.language, binaryReply);
-      } catch (upstreamError) {
-        console.error("Advanced chat upstream error:", upstreamError);
+      const tryModel = async (model: string): Promise<ParsedAdvancedTurnPayload | null> => {
         try {
-          const compatibilityRaw = await requestModelTurnCompatibility();
+          const firstRawResponse = await requestModelTurn(model, false);
+          let parsedTurn = parseAdvancedTurnPayload(firstRawResponse, parsedInput.language, binaryReply);
+
+          if (parsedTurn.mode === "json") {
+            return parsedTurn;
+          }
+
+          const retryRawResponse = await requestModelTurn(model, true);
+          parsedTurn = parseAdvancedTurnPayload(retryRawResponse, parsedInput.language, binaryReply);
+          if (parsedTurn.mode !== "failed") {
+            return parsedTurn;
+          }
+        } catch (retryError) {
+          const errorInfo = summarizeUpstreamError(retryError);
+          console.warn(
+            `Advanced chat model attempt failed (model=${model}, status=${errorInfo.status ?? "n/a"}, code=${errorInfo.code ?? "n/a"}): ${errorInfo.message}`,
+          );
+        }
+
+        try {
+          const compatibilityRaw = await requestModelTurnCompatibility(model);
           const compatibilityParsed = parseAdvancedTurnPayload(
             compatibilityRaw,
             parsedInput.language,
             binaryReply,
           );
           if (compatibilityParsed.mode !== "failed") {
-            parsedTurn = compatibilityParsed;
+            return compatibilityParsed;
           }
         } catch (compatibilityError) {
-          console.error("Advanced chat compatibility retry failed:", compatibilityError);
+          const errorInfo = summarizeUpstreamError(compatibilityError);
+          console.warn(
+            `Advanced chat compatibility attempt failed (model=${model}, status=${errorInfo.status ?? "n/a"}, code=${errorInfo.code ?? "n/a"}): ${errorInfo.message}`,
+          );
         }
 
-        if (!parsedTurn) {
-          res.json(buildAdvancedFallback(parsedInput));
-          return;
+        return null;
+      };
+
+      let parsedTurn: ParsedAdvancedTurnPayload | null = null;
+      for (const model of modelCandidates) {
+        parsedTurn = await tryModel(model);
+        if (parsedTurn) {
+          break;
         }
       }
 
-      if (!parsedTurn || parsedTurn.mode !== "json") {
-        try {
-          const retryRawResponse = await requestModelTurn(true);
-          const retryParsed = parseAdvancedTurnPayload(retryRawResponse, parsedInput.language, binaryReply);
-          if (retryParsed.mode !== "failed") {
-            parsedTurn = retryParsed;
-          }
-        } catch (retryError) {
-          console.warn("Advanced chat repair attempt failed:", retryError);
-        }
+      if (!parsedTurn) {
+        res.json(buildAdvancedFallback(parsedInput));
+        return;
       }
 
       if (!parsedTurn || parsedTurn.mode === "failed") {
@@ -2020,7 +2064,7 @@ Generate an After-Action Report in JSON, in English only, matching this structur
 Be direct, constructive, and critical when needed. Keep the points concise. The checklist must contain 10 to 15 actionable response rules. Do not use markdown or backticks. Return valid JSON only.`;
 
       const aiResponse = await openai.chat.completions.create({
-        model: "gpt-5.1",
+        model: DEBRIEF_MODEL,
         messages: [
           { role: "system", content: "You are an AI that only outputs valid JSON." },
           { role: "user", content: prompt },

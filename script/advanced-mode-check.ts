@@ -3,7 +3,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { setTimeout as delay } from "timers/promises";
 
 type JsonRecord = Record<string, unknown>;
-type MockMode = "valid" | "invalid_then_repair" | "always_invalid" | "upstream_error";
+type MockMode =
+  | "valid"
+  | "invalid_then_repair"
+  | "always_invalid"
+  | "upstream_error"
+  | "reject_response_format";
 
 interface AdvancedResponse {
   assistantMessage: string;
@@ -239,6 +244,16 @@ async function startMockServer(port: number): Promise<Server> {
     const prompt = parsePrompt(payload);
     const debriefRequest = looksLikeDebriefPrompt(prompt);
     const repairAttempt = isRepairPrompt(prompt);
+    const hasResponseFormat = typeof payload.response_format === "object" && payload.response_format !== null;
+
+    if (currentMockMode === "reject_response_format" && hasResponseFormat) {
+      writeJson(res, 400, {
+        error: {
+          message: "'messages' must contain the word 'json' in some form, to use 'response_format' of type 'json_object'.",
+        },
+      });
+      return;
+    }
 
     if (currentMockMode === "always_invalid") {
       if (mockLatencyMs > 0) {
@@ -490,6 +505,20 @@ async function runFunctionalChecks(scenarioId: string): Promise<void> {
     "Detailed directive should continue scenario flow instead of forcing the generic command reprompt",
   );
 
+  currentMockMode = "reject_response_format";
+  const compatibilityRecovered = await requestJson<AdvancedResponse>(
+    advancedPath,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildAdvancedBody(scenarioId, directivePool[0])),
+    },
+  );
+  assert(
+    compatibilityRecovered.data.source === "ai",
+    "When response_format is rejected upstream, compatibility retry should still return AI source",
+  );
+
   currentMockMode = "upstream_error";
   const wrappedFallback = await requestJson<AdvancedResponse>(
     advancedPath,
@@ -614,7 +643,11 @@ async function runStressCheck(scenarioId: string): Promise<void> {
   assert(failed === 0, `Expected zero failed requests in stress test, got ${failed}`);
   assert(parseErrors === 0, `Expected zero JSON parse errors in stress test, got ${parseErrors}`);
   assert((statusCounts.get(200) ?? 0) === total, "Expected all stress responses to be HTTP 200");
-  if (stressMode === "valid" || stressMode === "invalid_then_repair") {
+  if (
+    stressMode === "valid" ||
+    stressMode === "invalid_then_repair" ||
+    stressMode === "reject_response_format"
+  ) {
     assert((sourceCounts.get("ai") ?? 0) > 0, "Expected at least one AI-source response during stress test");
   }
 
@@ -655,8 +688,9 @@ async function main(): Promise<void> {
     stressMode === "valid" ||
       stressMode === "invalid_then_repair" ||
       stressMode === "always_invalid" ||
-      stressMode === "upstream_error",
-    "ADV_STRESS_MODE must be one of: valid, invalid_then_repair, always_invalid, upstream_error",
+      stressMode === "upstream_error" ||
+      stressMode === "reject_response_format",
+    "ADV_STRESS_MODE must be one of: valid, invalid_then_repair, always_invalid, upstream_error, reject_response_format",
   );
 
   const mockServer = await startMockServer(mockPort);
