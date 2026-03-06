@@ -12,6 +12,8 @@
     "test:e2e": "tsx script/e2e-smoke.ts",
     "test:security": "tsx script/security-check.ts",
     "test:load": "tsx script/load-test.ts",
+    "test:advanced": "node --import tsx script/advanced-mode-check.ts",
+    "test:advanced:stress": "ADV_ONLY_STRESS=1 node --import tsx script/advanced-mode-check.ts",
     "test:hardening": "npm run test:e2e && npm run test:security"
   },
   "dependencies": {
