@@ -471,6 +471,14 @@ async function runFunctionalChecks(scenarioId: string): Promise<void> {
   );
   assert(fallback.data.source === "local_fallback", "Expected local fallback on upstream error");
   assert(fallback.data.failureCode === "upstream_unavailable", "Expected upstream_unavailable code");
+  assert(
+    fallback.data.scoreDeltas.responseTempo >= 0,
+    "Detailed directive should not receive negative response-tempo delta in upstream fallback mode",
+  );
+  assert(
+    !fallback.data.assistantMessage.includes("State the command now:"),
+    "Detailed directive should continue scenario flow instead of forcing the generic command reprompt",
+  );
 
   currentMockMode = "valid";
   const debrief = await requestJson<DebriefResponse>(

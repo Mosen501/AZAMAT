@@ -486,6 +486,133 @@ function isBinaryReply(raw: string | undefined, language: Language): boolean {
   return words.every((word) => englishBinary.has(word));
 }
 
+interface CommandDirectiveSignals {
+  hasOwner: boolean;
+  hasAction: boolean;
+  hasTiming: boolean;
+  hasKpi: boolean;
+}
+
+function evaluateDirectiveSignals(raw: string | undefined): CommandDirectiveSignals {
+  const normalized = raw?.trim().toLowerCase() ?? "";
+  if (!normalized) {
+    return {
+      hasOwner: false,
+      hasAction: false,
+      hasTiming: false,
+      hasKpi: false,
+    };
+  }
+
+  const ownerPattern = /(قائد|مدير|فريق|خلية|مركز|وزارة|مستشفى|جهة|agency|team|lead|command|ops|operations|hospital|ministry)/i;
+  const actionPattern = /(فعّل|وجّه|نفّذ|انشر|أرسل|حوّل|فعِّل|activate|deploy|route|dispatch|issue|publish|enforce|start)/i;
+  const timingPattern = /(خلال|بعد|قبل|الآن|فور[اًا]?|دقيقة|دقائق|ساعة|ساعات|within|in the next|by|minute|minutes|hour|hours|t\+\d+)/i;
+  const kpiPattern = /(kpi|مؤشر|نسبة|%|زمن|وقت|إشغال|اشغال|انتظار|رضا|معدل|occupancy|wait|target|sla|<=|>=|≤|≥)/i;
+
+  return {
+    hasOwner: ownerPattern.test(normalized),
+    hasAction: actionPattern.test(normalized),
+    hasTiming: timingPattern.test(normalized),
+    hasKpi: kpiPattern.test(normalized),
+  };
+}
+
+function countDirectiveSignals(signals: CommandDirectiveSignals): number {
+  return Number(signals.hasOwner) + Number(signals.hasAction) + Number(signals.hasTiming) + Number(signals.hasKpi);
+}
+
+function listMissingDirectiveSignals(
+  signals: CommandDirectiveSignals,
+  language: Language,
+): string[] {
+  const labels =
+    language === "ar"
+      ? {
+          owner: "الجهة المسؤولة",
+          action: "الإجراء التنفيذي",
+          timing: "توقيت البداية ونقطة التحقق",
+          kpi: "مؤشر KPI المستهدف",
+        }
+      : {
+          owner: "responsible owner",
+          action: "specific action",
+          timing: "start timing and checkpoint",
+          kpi: "target KPI",
+        };
+
+  const missing: string[] = [];
+  if (!signals.hasOwner) {
+    missing.push(labels.owner);
+  }
+  if (!signals.hasAction) {
+    missing.push(labels.action);
+  }
+  if (!signals.hasTiming) {
+    missing.push(labels.timing);
+  }
+  if (!signals.hasKpi) {
+    missing.push(labels.kpi);
+  }
+  return missing;
+}
+
+function weakestMetricKey(scores: ScoreSet): MetricKey {
+  return [...METRIC_DEFS]
+    .map((metric) => ({ key: metric.key, value: scores[metric.key] }))
+    .sort((left, right) => left.value - right.value)[0]?.key ?? "teamAlignment";
+}
+
+function buildContinuationCommandQuestion(language: Language, weakestMetric: MetricKey): string {
+  if (language === "ar") {
+    return `أصدر الآن أمر المتابعة لحماية ${metricLabel(weakestMetric, "ar")}: من المسؤول خلال 10 دقائق، ما الإجراء الذي يبدأ فورا، متى نقطة التحقق التالية، وما KPI المستهدف قبل تلك النقطة؟`;
+  }
+
+  return `Issue the next command to protect ${metricLabel(weakestMetric, "en")}: who owns execution in the next 10 minutes, what exact action starts now, when is the next checkpoint, and which KPI target must be met by then?`;
+}
+
+function deriveOfflineFallbackDeltas(
+  completeness: number,
+  binaryReply: boolean,
+): ScoreSet {
+  if (binaryReply || completeness <= 1) {
+    return {
+      operationalControl: 0,
+      responseTempo: -2,
+      stakeholderTrust: -1,
+      teamAlignment: -2,
+      executiveComms: 0,
+    };
+  }
+
+  if (completeness === 2) {
+    return {
+      operationalControl: 0,
+      responseTempo: 0,
+      stakeholderTrust: -1,
+      teamAlignment: 0,
+      executiveComms: 0,
+    };
+  }
+
+  if (completeness === 3) {
+    return {
+      operationalControl: 1,
+      responseTempo: 1,
+      stakeholderTrust: 0,
+      teamAlignment: 1,
+      executiveComms: 0,
+    };
+  }
+
+  return {
+    operationalControl: 2,
+    responseTempo: 2,
+    stakeholderTrust: 0,
+    teamAlignment: 2,
+    executiveComms: 1,
+  };
+}
+
 function enforceDeltaTension(deltas: ScoreSet, binaryReply: boolean): ScoreSet {
   const next = { ...deltas };
   const values = Object.values(next);
@@ -745,39 +872,55 @@ function buildAdvancedFallback(
   input: z.infer<typeof api.advanced.chat.input>,
 ): AdvancedTurnResult {
   const lastUserMessage = [...input.history].reverse().find((entry) => entry.role === "user");
-  const scoreDeltas: ScoreSet = {
-    operationalControl: 0,
-    responseTempo: -2,
-    stakeholderTrust: -1,
-    teamAlignment: -2,
-    executiveComms: 0,
-  };
+  const lastDirective = lastUserMessage?.content;
+  const binaryReply = isBinaryReply(lastDirective, input.language);
+  const directiveSignals = evaluateDirectiveSignals(lastDirective);
+  const completeness = countDirectiveSignals(directiveSignals);
+  const missingSignals = listMissingDirectiveSignals(directiveSignals, input.language);
+  const weakestMetric = weakestMetricKey(input.currentScores);
+  const requiresDirectiveReset = binaryReply || completeness <= 2;
+
+  const scoreDeltas = enforceDeltaTension(
+    deriveOfflineFallbackDeltas(completeness, binaryReply),
+    binaryReply,
+  );
   const updatedScores = applyScoreDeltas(input.currentScores, scoreDeltas);
   const impactReason = buildImpactReason(scoreDeltas, input.language);
+  const sections: AdvancedTurnSections =
+    input.language === "en"
+      ? {
+          update:
+            "Live AI service is temporarily unavailable. Local continuity mode evaluated your latest directive to keep the simulation moving.",
+          assessment:
+            completeness >= 4
+              ? "Your directive was executable (owner/action/timing/KPI). Maintain this cadence while tightening cross-agency synchronization."
+              : `Your directive is not yet fully executable. Complete these missing parts: ${missingSignals.join(", ")}.`,
+          question:
+            completeness >= 4
+              ? buildContinuationCommandQuestion("en", weakestMetric)
+              : `${buildConcreteCommandQuestion("en")} Missing now: ${missingSignals.join(", ")}.`,
+        }
+      : {
+          update:
+            "خدمة الذكاء الاصطناعي غير متاحة مؤقتا. تم تفعيل وضع الاستمرارية المحلي وتقييم آخر توجيه للحفاظ على تسلسل المحاكاة.",
+          assessment:
+            completeness >= 4
+              ? "توجيهك كان قابلا للتنفيذ (مسؤول/إجراء/توقيت/KPI). حافظ على هذا النسق مع تشديد التنسيق بين الجهات."
+              : `التوجيه الحالي غير مكتمل تنفيذيا. العناصر الناقصة: ${missingSignals.join("، ")}.`,
+          question:
+            completeness >= 4
+              ? buildContinuationCommandQuestion("ar", weakestMetric)
+              : `${buildConcreteCommandQuestion("ar")} العناصر الناقصة الآن: ${missingSignals.join("، ")}.`,
+        };
 
-  if (input.language === "en") {
-    return {
-      assistantMessage: `Update:
-Live AI service is temporarily unavailable. No new field action was executed. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
-Assessment:
-Use local continuity mode and issue one executable command with owner, timing, and target KPI.
-Question:
-${buildConcreteCommandQuestion("en")}`,
-      scoreDeltas,
-      updatedScores,
-      impactReason,
-      source: "local_fallback",
-      failureCode: "upstream_unavailable",
-    };
-  }
+  const assistantMessage = normalizeAdvancedTurnResponse(
+    composeAdvancedTurnMessage(sections, input.language),
+    input.language,
+    requiresDirectiveReset,
+  );
 
   return {
-    assistantMessage: `تحديث:
-خدمة الذكاء الاصطناعي غير متاحة مؤقتا. لم يُنفذ إجراء ميداني جديد. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
-تقييم:
-استخدم وضع الاستمرارية المحلي وأصدر أمرا تنفيذيا واحدا يتضمن المالك الزمني ومؤشر الأداء المستهدف.
-سؤال:
-${buildConcreteCommandQuestion("ar")}`,
+    assistantMessage,
     scoreDeltas,
     updatedScores,
     impactReason,
