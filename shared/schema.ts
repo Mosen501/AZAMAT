@@ -150,6 +150,10 @@ export const advancedChatResponseSchema = z.object({
   scoreDeltas: scoreSchema,
   updatedScores: scoreSchema,
   impactReason: z.string(),
+  source: z.enum(["ai", "local_recovery", "local_fallback"]).default("ai"),
+  failureCode: z
+    .enum(["upstream_unavailable", "invalid_model_json", "policy_reprompt_needed"])
+    .optional(),
 });
 
 export type AdvancedChatResponse = z.infer<typeof advancedChatResponseSchema>;

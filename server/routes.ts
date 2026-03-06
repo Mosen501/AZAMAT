@@ -591,9 +591,159 @@ function buildImpactReason(deltas: ScoreSet, language: Language): string {
   return "Operational impact stayed limited this turn because the directive lacked measurable execution detail.";
 }
 
+type AdvancedTurnSource = "ai" | "local_recovery" | "local_fallback";
+type AdvancedFailureCode = "upstream_unavailable" | "invalid_model_json" | "policy_reprompt_needed";
+
+interface AdvancedTurnResult {
+  assistantMessage: string;
+  scoreDeltas: ScoreSet;
+  updatedScores: ScoreSet;
+  impactReason: string;
+  source: AdvancedTurnSource;
+  failureCode?: AdvancedFailureCode;
+}
+
+interface AdvancedTurnSections {
+  update: string;
+  assessment: string;
+  question: string;
+}
+
+function composeAdvancedTurnMessage(sections: AdvancedTurnSections, language: Language): string {
+  const labels =
+    language === "ar"
+      ? { update: "تحديث", assessment: "تقييم", question: "سؤال" }
+      : { update: "Update", assessment: "Assessment", question: "Question" };
+
+  return `${labels.update}:
+${sections.update}
+${labels.assessment}:
+${sections.assessment}
+${labels.question}:
+${sections.question}`;
+}
+
+function parseLikelyJsonObject(raw: string): Record<string, unknown> | null {
+  const trimmed = raw.trim();
+  const candidates = [trimmed];
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch?.[1]) {
+    candidates.push(fenceMatch[1].trim());
+  }
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object") {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return null;
+}
+
+function extractSectionsFromNormalizedMessage(
+  normalized: string,
+  language: Language,
+): AdvancedTurnSections | null {
+  const labels =
+    language === "ar"
+      ? { update: "تحديث", assessment: "تقييم", question: "سؤال" }
+      : { update: "Update", assessment: "Assessment", question: "Question" };
+  const lines = normalized.split(/\r?\n/).map((line) => line.trim());
+
+  const readBody = (label: string): string => {
+    const headerIndex = lines.findIndex((line) => line.toLowerCase() === `${label.toLowerCase()}:`);
+    if (headerIndex < 0) {
+      return "";
+    }
+    const body: string[] = [];
+    for (let index = headerIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (!line) {
+        continue;
+      }
+      if (line.endsWith(":")) {
+        break;
+      }
+      body.push(line);
+    }
+    return sanitizeAdvancedSection(body.join(" "));
+  };
+
+  const update = readBody(labels.update);
+  const assessment = readBody(labels.assessment);
+  const question = readBody(labels.question);
+  if (!update || !assessment || !question) {
+    return null;
+  }
+
+  return { update, assessment, question };
+}
+
+function buildAdvancedLocalRecovery(
+  input: z.infer<typeof api.advanced.chat.input>,
+  options: {
+    sections?: AdvancedTurnSections | null;
+    scoreDeltas?: ScoreSet;
+    impactReason?: string;
+    failureCode: AdvancedFailureCode;
+  },
+): AdvancedTurnResult {
+  const scoreDeltas = enforceDeltaTension(
+    options.scoreDeltas ?? {
+      operationalControl: 0,
+      responseTempo: 0,
+      stakeholderTrust: 0,
+      teamAlignment: 0,
+      executiveComms: 0,
+    },
+    options.failureCode === "policy_reprompt_needed",
+  );
+  const updatedScores = applyScoreDeltas(input.currentScores, scoreDeltas);
+  const impactReason = options.impactReason?.trim()
+    ? sanitizeAdvancedSection(options.impactReason)
+    : buildImpactReason(scoreDeltas, input.language);
+
+  const fallbackSections: AdvancedTurnSections = input.language === "en"
+    ? {
+        update: "The model response format was invalid this turn, so local simulation logic generated a safe continuation.",
+        assessment: "Your command can still be processed, but the next directive must remain explicit with owner, timing, and KPI.",
+        question: buildConcreteCommandQuestion("en"),
+      }
+    : {
+        update: "تنسيق استجابة النموذج كان غير صالح في هذه الجولة، لذلك تم توليد متابعة محلية بشكل آمن.",
+        assessment: "لا يزال بالإمكان متابعة القرار، لكن يجب أن يكون التوجيه التالي صريحا بالمالك والتوقيت ومؤشر الأداء.",
+        question: buildConcreteCommandQuestion("ar"),
+      };
+
+  const assistantMessage = normalizeAdvancedTurnResponse(
+    composeAdvancedTurnMessage(options.sections ?? fallbackSections, input.language),
+    input.language,
+    options.failureCode === "policy_reprompt_needed",
+  );
+
+  return {
+    assistantMessage,
+    scoreDeltas,
+    updatedScores,
+    impactReason,
+    source: "local_recovery",
+    failureCode: options.failureCode,
+  };
+}
+
 function buildAdvancedFallback(
   input: z.infer<typeof api.advanced.chat.input>,
-): { assistantMessage: string; scoreDeltas: ScoreSet; updatedScores: ScoreSet; impactReason: string } {
+): AdvancedTurnResult {
   const lastUserMessage = [...input.history].reverse().find((entry) => entry.role === "user");
   const scoreDeltas: ScoreSet = {
     operationalControl: 0,
@@ -608,27 +758,31 @@ function buildAdvancedFallback(
   if (input.language === "en") {
     return {
       assistantMessage: `Update:
-AI live analysis is unavailable right now. No new action was executed because the last directive lacks concrete who/what/when/KPI detail. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
+Live AI service is temporarily unavailable. No new field action was executed. Last directive noted: "${lastUserMessage?.content ?? "N/A"}".
 Assessment:
-Stay in manual mode and issue one executable command with owner, timing, and target KPI before the next move.
+Use local continuity mode and issue one executable command with owner, timing, and target KPI.
 Question:
-State the command now: who owns execution, what exact action starts within 10 minutes, when the next checkpoint is, and which KPI target must be reached by then?`,
+${buildConcreteCommandQuestion("en")}`,
       scoreDeltas,
       updatedScores,
       impactReason,
+      source: "local_fallback",
+      failureCode: "upstream_unavailable",
     };
   }
 
   return {
     assistantMessage: `تحديث:
-التحليل الذكي المباشر غير متاح حاليا. لم يُنفذ إجراء جديد لأن التوجيه الأخير يفتقد تفاصيل من/ماذا/متى/مؤشر. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
+خدمة الذكاء الاصطناعي غير متاحة مؤقتا. لم يُنفذ إجراء ميداني جديد. آخر توجيه مسجل: "${lastUserMessage?.content ?? "غير متاح"}".
 تقييم:
-اعمل بوضع يدوي وأصدر أمرا تنفيذيا واحدا يتضمن المالك الزمني ومؤشر أداء مستهدف قبل الخطوة التالية.
+استخدم وضع الاستمرارية المحلي وأصدر أمرا تنفيذيا واحدا يتضمن المالك الزمني ومؤشر الأداء المستهدف.
 سؤال:
-حدّد الآن أمرا تنفيذيا واضحا: من المسؤول، ما الإجراء الذي يبدأ خلال 10 دقائق، متى نقطة التحقق التالية، وما مؤشر الأداء المستهدف قبل تلك النقطة؟`,
+${buildConcreteCommandQuestion("ar")}`,
     scoreDeltas,
     updatedScores,
     impactReason,
+    source: "local_fallback",
+    failureCode: "upstream_unavailable",
   };
 }
 
@@ -718,6 +872,81 @@ function normalizeAdvancedTurnResponse(
   question = enforceConcreteCommandQuestion(question, language, forceConcreteQuestion);
 
   return `${labels.update}:\n${update}\n${labels.assessment}:\n${assessment}\n${labels.question}:\n${question}`;
+}
+
+interface ParsedAdvancedTurnPayload {
+  sections: AdvancedTurnSections | null;
+  scoreDeltas: ScoreSet;
+  impactReason: string | null;
+  mode: "json" | "recovered_text" | "failed";
+}
+
+function parseAdvancedTurnPayload(
+  raw: string,
+  language: Language,
+  forceConcreteQuestion: boolean,
+): ParsedAdvancedTurnPayload {
+  const emptyDeltas: ScoreSet = {
+    operationalControl: 0,
+    responseTempo: 0,
+    stakeholderTrust: 0,
+    teamAlignment: 0,
+    executiveComms: 0,
+  };
+
+  const parsedObject = parseLikelyJsonObject(raw);
+  if (parsedObject) {
+    const assistantMessageText = typeof parsedObject.assistantMessage === "string"
+      ? parsedObject.assistantMessage
+      : null;
+    const directSections =
+      typeof parsedObject.update === "string" &&
+      typeof parsedObject.assessment === "string" &&
+      typeof parsedObject.question === "string"
+        ? {
+            update: sanitizeAdvancedSection(parsedObject.update),
+            assessment: sanitizeAdvancedSection(parsedObject.assessment),
+            question: enforceConcreteCommandQuestion(parsedObject.question, language, forceConcreteQuestion),
+          }
+        : null;
+    const normalizedSections = assistantMessageText
+      ? extractSectionsFromNormalizedMessage(
+          normalizeAdvancedTurnResponse(assistantMessageText, language, forceConcreteQuestion),
+          language,
+        )
+      : null;
+    const sections = directSections ?? normalizedSections;
+
+    return {
+      sections,
+      scoreDeltas: normalizeAdvancedScoreDeltas(parsedObject.scoreDeltas),
+      impactReason: typeof parsedObject.impactReason === "string"
+        ? sanitizeAdvancedSection(parsedObject.impactReason)
+        : null,
+      mode: sections ? "json" : "failed",
+    };
+  }
+
+  const recoveredSections = extractSectionsFromNormalizedMessage(
+    normalizeAdvancedTurnResponse(raw, language, forceConcreteQuestion),
+    language,
+  );
+
+  if (!recoveredSections) {
+    return {
+      sections: null,
+      scoreDeltas: emptyDeltas,
+      impactReason: null,
+      mode: "failed",
+    };
+  }
+
+  return {
+    sections: recoveredSections,
+    scoreDeltas: emptyDeltas,
+    impactReason: null,
+    mode: "recovered_text",
+  };
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -1316,73 +1545,121 @@ Constraints:
 - No markdown or prose outside JSON.
 - Do not repeat scenario/rules verbatim.`;
 
-      const aiResponse = await openai.chat.completions.create({
-        model: "gpt-5.1",
-        messages: [
-          {
-            role: "system",
-            content:
-              parsedInput.language === "ar"
-                ? "أنت محاكي أزمات تدريبي. أعد JSON صالحا فقط. قيّم القرار السابق وولّد أوزان مؤشرات واقعية قابلة للتنفيذ."
-                : "You are a crisis simulation trainer. Return valid JSON only and assign realistic metric deltas.",
-          },
-          { role: "user", content: prompt },
-        ],
-        response_format: { type: "json_object" },
-        max_completion_tokens: 320,
-      });
+      const requestModelTurn = async (strictRepair: boolean): Promise<string> => {
+        const repairInstruction =
+          parsedInput.language === "ar"
+            ? "تصحيح التنسيق: أعد JSON صالحا فقط بالمفاتيح: update, assessment, question, impactReason, scoreDeltas. لا تضف أي نص خارج JSON."
+            : "FORMAT CORRECTION: Return valid JSON only with keys update, assessment, question, impactReason, scoreDeltas. No prose outside JSON.";
 
-      const assistantPayloadRaw = aiResponse.choices[0]?.message?.content?.trim();
-      if (!assistantPayloadRaw) {
-        throw new Error("Empty assistant response.");
-      }
-      const parsedPayload = JSON.parse(assistantPayloadRaw) as {
-        assistantMessage?: unknown;
-        update?: unknown;
-        assessment?: unknown;
-        question?: unknown;
-        impactReason?: unknown;
-        scoreDeltas?: unknown;
+        const aiResponse = await openai.chat.completions.create({
+          model: "gpt-5.1",
+          messages: [
+            {
+              role: "system",
+              content:
+                parsedInput.language === "ar"
+                  ? "أنت محاكي أزمات تدريبي. أعد JSON صالحا فقط. قيّم القرار السابق وولّد أوزان مؤشرات واقعية قابلة للتنفيذ."
+                  : "You are a crisis simulation trainer. Return valid JSON only and assign realistic metric deltas.",
+            },
+            { role: "user", content: prompt },
+            ...(strictRepair ? [{ role: "user" as const, content: repairInstruction }] : []),
+          ],
+          response_format: { type: "json_object" },
+          max_completion_tokens: 320,
+        });
+
+        const raw = aiResponse.choices[0]?.message?.content?.trim();
+        if (!raw) {
+          throw new Error("Empty assistant response.");
+        }
+        return raw;
       };
-      const rawAssistantMessage = typeof parsedPayload.assistantMessage === "string"
-        ? parsedPayload.assistantMessage
-        : [
-            `${parsedInput.language === "ar" ? "تحديث" : "Update"}: ${typeof parsedPayload.update === "string" ? parsedPayload.update : ""}`,
-            `${parsedInput.language === "ar" ? "تقييم" : "Assessment"}: ${typeof parsedPayload.assessment === "string" ? parsedPayload.assessment : ""}`,
-            `${parsedInput.language === "ar" ? "سؤال" : "Question"}: ${typeof parsedPayload.question === "string" ? parsedPayload.question : ""}`,
-          ].join("\n");
 
-      const guardedRawMessage = binaryReply
-        ? (parsedInput.language === "ar"
-          ? `تحديث:
-لم يتم اعتماد أي تنفيذ ميداني جديد لأن ردك الأخير كان نعم/لا بدون تفاصيل تشغيلية.
-تقييم:
-لا يمكن تحسين الأداء دون أمر تنفيذي واضح يحدد المالك والتوقيت ومؤشر القياس.
-سؤال:
-حدّد الآن أمرا تنفيذيا واضحا: من المسؤول، ما الإجراء الذي يبدأ خلال 10 دقائق، متى نقطة التحقق التالية، وما مؤشر الأداء المستهدف قبل تلك النقطة؟`
-          : `Update:
-No new field action was authorized because your last reply was yes/no without execution detail.
-Assessment:
-Performance cannot improve until you issue one concrete command with owner, timing, and measurable KPI.
-Question:
-State the command now: who owns execution, what exact action starts within 10 minutes, when the next checkpoint is, and which KPI target must be reached by then?`)
-        : rawAssistantMessage;
+      let parsedTurn: ParsedAdvancedTurnPayload | null = null;
+
+      try {
+        const firstRawResponse = await requestModelTurn(false);
+        parsedTurn = parseAdvancedTurnPayload(firstRawResponse, parsedInput.language, binaryReply);
+      } catch (upstreamError) {
+        console.error("Advanced chat upstream error:", upstreamError);
+        res.json(buildAdvancedFallback(parsedInput));
+        return;
+      }
+
+      if (!parsedTurn || parsedTurn.mode !== "json") {
+        try {
+          const retryRawResponse = await requestModelTurn(true);
+          const retryParsed = parseAdvancedTurnPayload(retryRawResponse, parsedInput.language, binaryReply);
+          if (retryParsed.mode !== "failed") {
+            parsedTurn = retryParsed;
+          }
+        } catch (retryError) {
+          console.warn("Advanced chat repair attempt failed:", retryError);
+        }
+      }
+
+      if (!parsedTurn || parsedTurn.mode === "failed") {
+        res.json(buildAdvancedLocalRecovery(parsedInput, {
+          failureCode: "invalid_model_json",
+        }));
+        return;
+      }
+
+      if (binaryReply) {
+        const policySections: AdvancedTurnSections = parsedInput.language === "ar"
+          ? {
+              update: "لم يتم اعتماد أي تنفيذ ميداني جديد لأن ردك الأخير كان نعم/لا بدون تفاصيل تشغيلية.",
+              assessment: "لا يمكن تحسين الأداء دون أمر تنفيذي واضح يحدد المالك والتوقيت ومؤشر القياس.",
+              question: buildConcreteCommandQuestion("ar"),
+            }
+          : {
+              update: "No new field action was authorized because your last reply was yes/no without execution detail.",
+              assessment: "Performance cannot improve until you issue one concrete command with owner, timing, and measurable KPI.",
+              question: buildConcreteCommandQuestion("en"),
+            };
+
+        res.json(buildAdvancedLocalRecovery(parsedInput, {
+          failureCode: "policy_reprompt_needed",
+          sections: policySections,
+          scoreDeltas: parsedTurn.scoreDeltas,
+          impactReason: parsedTurn.impactReason ?? undefined,
+        }));
+        return;
+      }
+
+      if (parsedTurn.mode === "recovered_text") {
+        res.json(buildAdvancedLocalRecovery(parsedInput, {
+          failureCode: "invalid_model_json",
+          sections: parsedTurn.sections,
+          scoreDeltas: parsedTurn.scoreDeltas,
+          impactReason: parsedTurn.impactReason ?? undefined,
+        }));
+        return;
+      }
+
+      if (!parsedTurn.sections) {
+        res.json(buildAdvancedLocalRecovery(parsedInput, {
+          failureCode: "invalid_model_json",
+        }));
+        return;
+      }
 
       const assistantMessage = normalizeAdvancedTurnResponse(
-        guardedRawMessage,
+        composeAdvancedTurnMessage(parsedTurn.sections, parsedInput.language),
         parsedInput.language,
-        binaryReply,
+        false,
       );
-      const scoreDeltas = enforceDeltaTension(
-        normalizeAdvancedScoreDeltas(parsedPayload.scoreDeltas),
-        binaryReply,
-      );
+      const scoreDeltas = enforceDeltaTension(parsedTurn.scoreDeltas, false);
       const updatedScores = applyScoreDeltas(parsedInput.currentScores, scoreDeltas);
-      const impactReason = typeof parsedPayload.impactReason === "string" && parsedPayload.impactReason.trim()
-        ? sanitizeAdvancedSection(parsedPayload.impactReason)
-        : buildImpactReason(scoreDeltas, parsedInput.language);
+      const impactReason = parsedTurn.impactReason ?? buildImpactReason(scoreDeltas, parsedInput.language);
 
-      res.json({ assistantMessage, scoreDeltas, updatedScores, impactReason });
+      res.json({
+        assistantMessage,
+        scoreDeltas,
+        updatedScores,
+        impactReason,
+        source: "ai",
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         res.status(400).json({ message: error.errors[0]?.message || "Validation Error" });
@@ -1392,7 +1669,9 @@ State the command now: who owns execution, what exact action starts within 10 mi
       console.error("Advanced chat error:", error);
 
       if (input) {
-        res.json(buildAdvancedFallback(input));
+        res.json(buildAdvancedLocalRecovery(input, {
+          failureCode: "invalid_model_json",
+        }));
         return;
       }
 

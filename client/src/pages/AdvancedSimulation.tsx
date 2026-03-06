@@ -179,9 +179,7 @@ export default function AdvancedSimulation() {
       },
       {
         onSuccess: (response) => {
-          const fallbackDetected =
-            response.assistantMessage.includes("AI live analysis is unavailable") ||
-            response.assistantMessage.includes("التحليل الذكي المباشر غير متاح");
+          const fallbackDetected = response.source === "local_fallback";
           if (fallbackDetected) {
             setIsOfflineFallbackMode(true);
           }
