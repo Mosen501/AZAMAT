@@ -1756,6 +1756,50 @@ Constraints:
         return raw;
       };
 
+      const requestModelTurnCompatibility = async (): Promise<string> => {
+        const lastDirective = extractDirectiveCandidate(lastUserMessage?.content);
+        const weakestMetricForRetry = [...METRIC_DEFS]
+          .map((metric) => ({ key: metric.key, value: parsedInput.currentScores[metric.key] }))
+          .sort((left, right) => left.value - right.value)[0]?.key ?? "teamAlignment";
+        const compactPrompt =
+          parsedInput.language === "ar"
+            ? `
+أعد JSON صالحا فقط بدون Markdown لهذا الدور: ${localizedRole} ضمن سيناريو ${scenario.title}.
+آخر توجيه للمتدرب: ${lastDirective || "غير متاح"}.
+أضعف مؤشر حاليا: ${metricLabel(weakestMetricForRetry, "ar")}.
+المطلوب JSON بهذه المفاتيح فقط: update, assessment, question, impactReason, scoreDeltas.
+قواعد scoreDeltas: أعداد صحيحة بين -12 و +12 مع مفاضلة واقعية.
+            `
+            : `
+Return valid JSON only (no markdown) for role ${localizedRole} in scenario ${scenario.title}.
+Latest trainee directive: ${lastDirective || "N/A"}.
+Current weakest metric: ${metricLabel(weakestMetricForRetry, "en")}.
+Required JSON keys only: update, assessment, question, impactReason, scoreDeltas.
+scoreDeltas must be integers in [-12, 12] with realistic tradeoffs.
+            `;
+
+        const aiResponse = await openai.chat.completions.create({
+          model: "gpt-5.1",
+          messages: [
+            {
+              role: "system",
+              content:
+                parsedInput.language === "ar"
+                  ? "أنت محاكي أزمات تدريبي. أعد json صالحا فقط."
+                  : "You are a crisis simulation trainer. Return valid json only.",
+            },
+            { role: "user", content: compactPrompt },
+          ],
+          max_completion_tokens: 320,
+        });
+
+        const raw = aiResponse.choices[0]?.message?.content?.trim();
+        if (!raw) {
+          throw new Error("Empty assistant response from compatibility retry.");
+        }
+        return raw;
+      };
+
       let parsedTurn: ParsedAdvancedTurnPayload | null = null;
 
       try {
@@ -1763,8 +1807,24 @@ Constraints:
         parsedTurn = parseAdvancedTurnPayload(firstRawResponse, parsedInput.language, binaryReply);
       } catch (upstreamError) {
         console.error("Advanced chat upstream error:", upstreamError);
-        res.json(buildAdvancedFallback(parsedInput));
-        return;
+        try {
+          const compatibilityRaw = await requestModelTurnCompatibility();
+          const compatibilityParsed = parseAdvancedTurnPayload(
+            compatibilityRaw,
+            parsedInput.language,
+            binaryReply,
+          );
+          if (compatibilityParsed.mode !== "failed") {
+            parsedTurn = compatibilityParsed;
+          }
+        } catch (compatibilityError) {
+          console.error("Advanced chat compatibility retry failed:", compatibilityError);
+        }
+
+        if (!parsedTurn) {
+          res.json(buildAdvancedFallback(parsedInput));
+          return;
+        }
       }
 
       if (!parsedTurn || parsedTurn.mode !== "json") {
