@@ -1,13 +1,18 @@
 import { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import { Terminal, ShieldAlert } from "lucide-react";
+import { useLanguage } from "@/lib/language";
 import { cn } from "@/lib/utils";
 
 export function Layout({ children, className }: { children: ReactNode; className?: string }) {
   const [location] = useLocation();
+  const { isArabic, text, toggleLanguage } = useLanguage();
 
   return (
-    <div className="min-h-screen bg-background text-foreground scanline flex flex-col font-body">
+    <div
+      className="min-h-screen bg-background text-foreground scanline flex flex-col font-body"
+      dir={isArabic ? "rtl" : "ltr"}
+    >
       {/* Top Navbar */}
       <header className="border-b border-primary/20 bg-secondary/50 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -16,11 +21,11 @@ export function Layout({ children, className }: { children: ReactNode; className
               <ShieldAlert className="w-5 h-5 text-primary" />
             </div>
             <h1 className="text-xl font-display font-bold text-glow tracking-widest text-primary">
-              EDGECASE<span className="text-foreground">.AI</span>
+              AZAMAT.AI
             </h1>
           </Link>
           
-          <nav className="flex items-center gap-6 text-sm font-display tracking-wider uppercase">
+          <nav className="flex items-center gap-4 text-sm font-display tracking-wider uppercase">
             <Link 
               href="/" 
               className={cn(
@@ -28,7 +33,7 @@ export function Layout({ children, className }: { children: ReactNode; className
                 location === "/" ? "text-primary" : "text-muted-foreground"
               )}
             >
-              Home
+              {text("Home", "الرئيسية")}
             </Link>
             <Link 
               href="/admin" 
@@ -38,8 +43,15 @@ export function Layout({ children, className }: { children: ReactNode; className
               )}
             >
               <Terminal className="w-4 h-4" />
-              <span>Admin</span>
+              <span>{text("Admin", "الإدارة")}</span>
             </Link>
+            <button
+              type="button"
+              onClick={toggleLanguage}
+              className="rounded border border-primary/30 px-3 py-1 text-xs text-primary transition-colors hover:bg-primary/10"
+            >
+              {isArabic ? "الإنجليزية" : "العربية"}
+            </button>
           </nav>
         </div>
       </header>
@@ -52,10 +64,13 @@ export function Layout({ children, className }: { children: ReactNode; className
       {/* Footer */}
       <footer className="border-t border-primary/10 bg-secondary/30 py-6 mt-auto">
         <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-muted-foreground font-display uppercase tracking-widest">
-          <p>© {new Date().getFullYear()} EDGECASE AI. Simulation Platform v1.0.4</p>
-          <div className="flex gap-4">
-            <span className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span> SYSTEM ONLINE</span>
-          </div>
+          <p>
+            {text(
+              `© ${new Date().getFullYear()} AZAMAT.AI. Simulation v1.0.4`,
+              `© ${new Date().getFullYear()} AZAMAT.AI. المحاكاة v1.0.4`,
+            )}
+          </p>
+          <div>MASA</div>
         </div>
       </footer>
     </div>

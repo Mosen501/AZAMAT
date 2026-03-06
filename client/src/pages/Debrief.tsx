@@ -1,39 +1,117 @@
-import { useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { Layout } from "@/components/Layout";
 import { CyberButton } from "@/components/CyberButton";
 import { ScoreGauge } from "@/components/ScoreGauge";
 import { useSimulation } from "@/hooks/use-simulation";
 import { useGenerateDebrief } from "@/hooks/use-api";
-import { ShieldAlert, Zap, MessageSquareWarning, FileText, CheckCircle2, AlertTriangle, Target, ListChecks, RotateCcw } from "lucide-react";
+import { useLanguage } from "@/lib/language";
+import { METRIC_CONFIG } from "@/lib/metric-config";
+import { localizeRole } from "@/lib/role-copy";
+import { FileText, CheckCircle2, AlertTriangle, Target, ListChecks, RotateCcw } from "lucide-react";
 import { motion } from "framer-motion";
 
 export default function Debrief() {
   const [, setLocation] = useLocation();
-  const { state, resetSimulation } = useSimulation();
+  const { state, resetSimulation, restartRun } = useSimulation();
+  const { text, isArabic } = useLanguage();
+  const [requestedLanguage, setRequestedLanguage] = useState<"en" | "ar" | null>(null);
+  const targetLanguage = isArabic ? "ar" : "en";
   
-  const { mutate: generateDebrief, data: debrief, isPending, isError } = useGenerateDebrief();
+  const {
+    mutate: generateDebrief,
+    data: debrief,
+    isPending,
+    isError,
+    error,
+    reset: resetDebrief,
+  } = useGenerateDebrief();
 
   useEffect(() => {
     // Only generate if we have a role and history
-    if (!state.role || state.history.length === 0) {
+    if (state.level !== "beginner" || !state.role || !state.scenarioId || state.history.length === 0) {
       setLocation("/");
       return;
     }
 
     // Trigger debrief generation if we don't have it yet
     if (!debrief && !isPending && !isError) {
+      setRequestedLanguage(targetLanguage);
       generateDebrief({
+        scenarioId: state.scenarioId,
+        language: targetLanguage,
         role: state.role,
-        history: state.history
+        history: state.history,
       });
     }
-  }, [state, debrief, isPending, isError, generateDebrief, setLocation]);
+  }, [state, debrief, isPending, isError, generateDebrief, setLocation, targetLanguage]);
 
-  const handleTryAgain = () => {
+  useEffect(() => {
+    if (!debrief || isPending || isError || !state.role || !state.scenarioId) {
+      return;
+    }
+
+    if (requestedLanguage === targetLanguage) {
+      return;
+    }
+
+    resetDebrief();
+    setRequestedLanguage(targetLanguage);
+    generateDebrief({
+      scenarioId: state.scenarioId,
+      language: targetLanguage,
+      role: state.role,
+      history: state.history,
+    });
+  }, [
+    debrief,
+    isPending,
+    isError,
+    state.role,
+    state.scenarioId,
+    state.history,
+    requestedLanguage,
+    targetLanguage,
+    resetDebrief,
+    generateDebrief,
+  ]);
+
+  const handleRestartSameSetup = () => {
+    resetDebrief();
+    setRequestedLanguage(null);
+    restartRun();
+    setLocation("/sim");
+  };
+
+  const handleReturnHome = () => {
+    resetDebrief();
+    setRequestedLanguage(null);
     resetSimulation();
     setLocation("/");
   };
+
+  if (isError) {
+    return (
+      <Layout className="items-center justify-center">
+        <div className="glass-panel p-8 text-center max-w-lg">
+          <AlertTriangle className="w-16 h-16 text-destructive mx-auto mb-4" />
+          <h2 className="text-2xl font-display text-destructive mb-2 uppercase">
+            {text("Report Generation Failed", "فشل توليد التقرير")}
+          </h2>
+          <p className="text-muted-foreground mb-6">
+            {error?.message ||
+              text(
+                "The AI subsystem encountered an error processing your results.",
+                "واجه النظام الذكي خطأ أثناء معالجة نتائجك.",
+              )}
+          </p>
+          <CyberButton onClick={handleReturnHome} variant="secondary">
+            {text("Return Home", "العودة للرئيسية")}
+          </CyberButton>
+        </div>
+      </Layout>
+    );
+  }
 
   if (isPending || !debrief) {
     return (
@@ -48,28 +126,29 @@ export default function Debrief() {
             <FileText className="w-8 h-8 text-primary absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-pulse" />
           </div>
           <div>
-            <h2 className="text-2xl font-display font-bold uppercase text-glow tracking-widest mb-2">Compiling A.A.R.</h2>
-            <p className="text-muted-foreground">AI is analyzing your decision matrix and generating the After-Action Report...</p>
+            <h2 className="text-2xl font-display font-bold uppercase text-glow tracking-widest mb-2">
+              {text("Compiling A.A.R.", "جار إعداد التقرير")}
+            </h2>
+            <p className="text-muted-foreground">
+              {text(
+                "AI is analyzing your decision matrix and generating the After-Action Report...",
+                "يقوم النظام بتحليل قراراتك وإعداد تقرير ما بعد الحدث...",
+              )}
+            </p>
           </div>
         </motion.div>
       </Layout>
     );
   }
 
-  if (isError) {
-    return (
-      <Layout className="items-center justify-center">
-        <div className="glass-panel p-8 text-center max-w-lg">
-          <AlertTriangle className="w-16 h-16 text-destructive mx-auto mb-4" />
-          <h2 className="text-2xl font-display text-destructive mb-2 uppercase">Report Generation Failed</h2>
-          <p className="text-muted-foreground mb-6">The AI subsystem encountered an error processing your results.</p>
-          <CyberButton onClick={handleTryAgain} variant="secondary">Return Home</CyberButton>
-        </div>
-      </Layout>
-    );
-  }
+  const isOfflineFallback = debrief.summary.some(
+    (line) =>
+      line.includes("Live AI was unavailable") ||
+      line.includes("تعذر الوصول إلى OpenAI") ||
+      line.includes("تحليل محلي محدد"),
+  );
 
-  const Section = ({ title, icon, items, type }: { title: string, icon: React.ReactNode, items: string[], type: "success" | "warning" | "danger" | "info" }) => {
+  const Section = ({ title, icon, items, type }: { title: string, icon: ReactNode, items: string[], type: "success" | "warning" | "danger" | "info" }) => {
     const colors = {
       success: "border-success/30 bg-success/5 text-success",
       warning: "border-warning/30 bg-warning/5 text-warning",
@@ -103,42 +182,94 @@ export default function Debrief() {
         className="max-w-5xl mx-auto w-full flex flex-col gap-8"
       >
         <div className="text-center mb-4">
-          <h1 className="text-3xl md:text-4xl font-black font-display text-glow uppercase tracking-widest mb-2">After-Action Report</h1>
-          <p className="text-muted-foreground text-lg">Role: <span className="text-primary font-bold">{state.role}</span></p>
+          <h1 className="text-3xl md:text-4xl font-black font-display text-glow uppercase tracking-widest mb-2">
+            {text("After-Action Report", "تقرير ما بعد الحدث")}
+          </h1>
+          <p className="text-muted-foreground text-lg">
+            {text("Role:", "الدور:")}{" "}
+            <span className="text-primary font-bold">{localizeRole(state.role, isArabic)}</span>
+          </p>
         </div>
+
+        {isOfflineFallback && (
+          <div className="rounded border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning">
+            {text(
+              "Offline AI fallback mode: this report was generated from deterministic local analysis.",
+              "وضع بديل بدون ذكاء مباشر: تم توليد هذا التقرير من تحليل محلي حتمي.",
+            )}
+          </div>
+        )}
 
         {/* Final Scores */}
         <div className="glass-panel p-6">
-          <h2 className="font-display uppercase tracking-widest text-muted-foreground mb-4 text-sm text-center">Final Metrics</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            <ScoreGauge label="Risk Control" value={state.scores.riskControl} icon={<ShieldAlert className="w-5 h-5" />} className="bg-transparent border-none p-0" />
-            <ScoreGauge label="Speed & Priority" value={state.scores.speed} icon={<Zap className="w-5 h-5" />} className="bg-transparent border-none p-0" />
-            <ScoreGauge label="Stakeholder Comms" value={state.scores.comms} icon={<MessageSquareWarning className="w-5 h-5" />} className="bg-transparent border-none p-0" />
+          <h2 className="font-display uppercase tracking-widest text-muted-foreground mb-4 text-sm text-center">
+            {text("Final Metrics", "المؤشرات النهائية")}
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6">
+            {METRIC_CONFIG.map((metric) => {
+              const MetricIcon = metric.icon;
+
+              return (
+                <ScoreGauge
+                  key={metric.key}
+                  label={text(metric.labelEn, metric.labelAr)}
+                  value={state.scores[metric.key]}
+                  icon={<MetricIcon className="w-5 h-5" />}
+                  className="bg-transparent border-none p-0"
+                  isArabic={isArabic}
+                />
+              );
+            })}
           </div>
         </div>
 
         {/* Debrief Content Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="md:col-span-2">
-            <Section title="Executive Summary" icon={<FileText />} items={debrief.summary} type="info" />
+            <Section
+              title={text("Executive Summary", "الملخص التنفيذي")}
+              icon={<FileText />}
+              items={debrief.summary}
+              type="info"
+            />
           </div>
           
-          <Section title="What Went Well" icon={<CheckCircle2 />} items={debrief.wentWell} type="success" />
-          <Section title="What To Improve" icon={<Target />} items={debrief.toImprove} type="warning" />
+          <Section
+            title={text("What Went Well", "ما سار بشكل جيد")}
+            icon={<CheckCircle2 />}
+            items={debrief.wentWell}
+            type="success"
+          />
+          <Section
+            title={text("What To Improve", "ما يجب تحسينه")}
+            icon={<Target />}
+            items={debrief.toImprove}
+            type="warning"
+          />
           
           <div className="md:col-span-2">
-            <Section title="Missed Signals" icon={<AlertTriangle />} items={debrief.missedSignals} type="danger" />
+            <Section
+              title={text("Missed Signals", "الإشارات التي فاتت")}
+              icon={<AlertTriangle />}
+              items={debrief.missedSignals}
+              type="danger"
+            />
           </div>
           
           <div className="md:col-span-2">
-            <Section title="Next-Time Checklist" icon={<ListChecks />} items={debrief.checklist} type="info" />
+            <Section
+              title={text("Next-Time Checklist", "قائمة المراجعة للمرة القادمة")}
+              icon={<ListChecks />}
+              items={debrief.checklist}
+              type="info"
+            />
           </div>
         </div>
 
         <div className="flex justify-center mt-8 pb-12">
-          <CyberButton size="lg" onClick={handleTryAgain} className="min-w-[200px]">
+          <CyberButton size="lg" onClick={handleRestartSameSetup} className="min-w-[200px]">
             <RotateCcw className="w-5 h-5" />
-            Restart Simulation
+            {text("Restart Simulation", "إعادة المحاكاة")}
           </CyberButton>
         </div>
       </motion.div>

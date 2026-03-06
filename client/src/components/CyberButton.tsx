@@ -1,8 +1,9 @@
-import { ButtonHTMLAttributes } from "react";
-import { motion } from "framer-motion";
+import { type ReactNode } from "react";
+import { motion, type HTMLMotionProps } from "framer-motion";
 import { cn } from "@/lib/utils";
 
-interface CyberButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+interface CyberButtonProps extends Omit<HTMLMotionProps<"button">, "ref" | "children"> {
+  children?: ReactNode;
   variant?: "primary" | "secondary" | "danger" | "ghost";
   size?: "sm" | "md" | "lg";
   fullWidth?: boolean;
