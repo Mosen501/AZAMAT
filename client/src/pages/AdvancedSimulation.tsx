@@ -23,6 +23,47 @@ interface ChatTurnMessage extends AdvancedChatMessage {
   impact?: TurnImpact;
 }
 
+interface CommandHintStatus {
+  hasOwner: boolean;
+  hasAction: boolean;
+  hasTiming: boolean;
+  hasKpi: boolean;
+}
+
+function extractQuestionLine(message: string, isArabic: boolean): string {
+  const label = isArabic ? "سؤال:" : "Question:";
+  const lines = message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const index = lines.findIndex((line) => line.toLowerCase() === label.toLowerCase());
+  if (index >= 0) {
+    return lines.slice(index + 1).join(" ").trim();
+  }
+  return "";
+}
+
+function evaluateCommandHint(input: string): CommandHintStatus {
+  const normalized = input.trim().toLowerCase();
+  if (!normalized) {
+    return {
+      hasOwner: false,
+      hasAction: false,
+      hasTiming: false,
+      hasKpi: false,
+    };
+  }
+
+  const ownerPattern = /(قائد|مدير|فريق|خلية|مركز|وزارة|مستشفى|جهة|agency|team|lead|command|ops|operations|hospital|ministry)/i;
+  const actionPattern = /(فعّل|وجّه|نفّذ|انشر|أرسل|حوّل|فعِّل|activate|deploy|route|dispatch|issue|publish|enforce|start)/i;
+  const timingPattern = /(خلال|بعد|قبل|الآن|فور[اًا]?|دقيقة|دقائق|ساعة|ساعات|within|in the next|by|minute|minutes|hour|hours)/i;
+  const kpiPattern = /(kpi|مؤشر|نسبة|%|زمن|وقت|إشغال|اشغال|انتظار|رضا|معدل|occupancy|wait|target|sla)/i;
+
+  return {
+    hasOwner: ownerPattern.test(normalized),
+    hasAction: actionPattern.test(normalized),
+    hasTiming: timingPattern.test(normalized),
+    hasKpi: kpiPattern.test(normalized),
+  };
+}
+
 function buildRunHistoryFromAdvancedChat(
   messages: ChatTurnMessage[],
   scores: ScoreSet,
@@ -115,6 +156,14 @@ export default function AdvancedSimulation() {
   const hasUserDirective = messages.some((message) => message.role === "user");
   const userTurnCount = messages.filter((message) => message.role === "user").length;
   const timelineLabel = `T+${userTurnCount * 5}m`;
+  const lastAssistantQuestion = extractQuestionLine(
+    [...messages].reverse().find((entry) => entry.role === "assistant")?.content ?? "",
+    isArabic,
+  );
+  const commandHint = evaluateCommandHint(draft);
+  const draftTemplate = isArabic
+    ? "يوجّه [الجهة المسؤولة] لتنفيذ [الإجراء المحدد] خلال [الوقت المحدد]، مع نقطة تحقق عند [الوقت]، وKPI: [المؤشر المستهدف] إلى [القيمة]."
+    : "Direct [owner] to execute [specific action] within [time], with a checkpoint at [time], and KPI: [target metric] to [value].";
 
   const localizedRules = useMemo(
     () => selectedRules.map((rule) => (isArabic ? rule.ar : rule.en)),
@@ -456,6 +505,45 @@ export default function AdvancedSimulation() {
           </div>
 
           <div className="mt-4 flex flex-col gap-3">
+            <div className="rounded border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+              <p className="font-semibold text-primary mb-1">
+                {text("Next Action Required", "المطلوب في الخطوة التالية")}
+              </p>
+              <p className="text-muted-foreground leading-6">
+                {lastAssistantQuestion || text(
+                  "Write one executable command with owner, timing, and KPI target.",
+                  "اكتب أمرا تنفيذيا واحدا يتضمن الجهة المسؤولة والتوقيت ومؤشر KPI مستهدف.",
+                )}
+              </p>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div className={commandHint.hasOwner ? "text-success" : "text-warning"}>
+                  {commandHint.hasOwner ? "✓ " : "• "}
+                  {text("Owner specified", "تم تحديد الجهة المسؤولة")}
+                </div>
+                <div className={commandHint.hasAction ? "text-success" : "text-warning"}>
+                  {commandHint.hasAction ? "✓ " : "• "}
+                  {text("Action specified", "تم تحديد الإجراء")}
+                </div>
+                <div className={commandHint.hasTiming ? "text-success" : "text-warning"}>
+                  {commandHint.hasTiming ? "✓ " : "• "}
+                  {text("Timing specified", "تم تحديد التوقيت")}
+                </div>
+                <div className={commandHint.hasKpi ? "text-success" : "text-warning"}>
+                  {commandHint.hasKpi ? "✓ " : "• "}
+                  {text("KPI specified", "تم تحديد مؤشر الأداء")}
+                </div>
+              </div>
+              <div className="mt-3 flex justify-end">
+                <CyberButton
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setDraft(draftTemplate)}
+                  disabled={chatTurn.isPending || debrief.isPending}
+                >
+                  {text("Use Reply Template", "استخدم قالب الرد")}
+                </CyberButton>
+              </div>
+            </div>
             <textarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -467,8 +555,8 @@ export default function AdvancedSimulation() {
               }}
               className="min-h-[90px] rounded-md border border-input bg-background px-3 py-2 text-sm leading-6"
               placeholder={text(
-                "Type your next command. Press Enter to send, Shift+Enter for a new line.",
-                "اكتب توجيهك التالي. اضغط Enter للإرسال وShift+Enter لسطر جديد.",
+                "Type one executable command with owner, timing, and KPI. Press Enter to send, Shift+Enter for a new line.",
+                "اكتب أمرا تنفيذيا واحدا يتضمن الجهة المسؤولة والتوقيت وKPI. اضغط Enter للإرسال وShift+Enter لسطر جديد.",
               )}
             />
             <div className="flex justify-end">
