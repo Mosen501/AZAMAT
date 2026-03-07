@@ -16,8 +16,12 @@ interface LanguageContextValue {
   text: (english: string, arabic: string) => string;
 }
 
-const STORAGE_KEY = "azamat_ui_language";
-const LEGACY_STORAGE_KEYS = ["nawazil_ui_language", "legacy_ui_language"] as const;
+const STORAGE_KEY = "crisisim_ui_language";
+const LEGACY_STORAGE_KEYS = [
+  "azamat_ui_language",
+  "nawazil_ui_language",
+  "legacy_ui_language",
+] as const;
 
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 

@@ -550,7 +550,7 @@ export default function Admin() {
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = `azamat-admin-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      link.download = `crisisim-admin-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

@@ -17,6 +17,9 @@ import { Activity, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { LocalizedCopy } from "@shared/schema";
 
+const HOME_ACTIVITY_STORAGE_KEY = "crisisim_home_activity_visible";
+const HOME_ACTIVITY_LEGACY_STORAGE_KEYS = ["azamat_home_activity_visible"] as const;
+
 type DisplaySector = {
   id: string;
   label: LocalizedCopy;
@@ -39,7 +42,12 @@ export default function Home() {
   const [, setLocation] = useLocation();
   const [showActivity, setShowActivity] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("azamat_home_activity_visible") !== "0";
+      const stored = localStorage.getItem(HOME_ACTIVITY_STORAGE_KEY);
+      const legacy = HOME_ACTIVITY_LEGACY_STORAGE_KEYS
+        .map((key) => localStorage.getItem(key))
+        .find(Boolean);
+      const value = stored ?? legacy;
+      return value !== "0";
     } catch {
       return true;
     }
@@ -156,7 +164,7 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("azamat_home_activity_visible", showActivity ? "1" : "0");
+      localStorage.setItem(HOME_ACTIVITY_STORAGE_KEY, showActivity ? "1" : "0");
     } catch {
       // Ignore persistence issues in restricted environments.
     }

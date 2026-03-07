@@ -21,7 +21,7 @@ export function Layout({ children, className }: { children: ReactNode; className
               <ShieldAlert className="w-5 h-5 text-primary" />
             </div>
             <h1 className="text-xl font-display font-bold text-glow tracking-widest text-primary">
-              AZAMAT.AI
+              CrisiSim
             </h1>
           </Link>
           
@@ -66,8 +66,8 @@ export function Layout({ children, className }: { children: ReactNode; className
         <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-muted-foreground font-display uppercase tracking-widest">
           <p>
             {text(
-              `© ${new Date().getFullYear()} AZAMAT.AI. Simulation v1.0.4`,
-              `© ${new Date().getFullYear()} AZAMAT.AI. المحاكاة v1.0.4`,
+              `© ${new Date().getFullYear()} CrisiSim. Simulation v1.0.4`,
+              `© ${new Date().getFullYear()} CrisiSim. المحاكاة v1.0.4`,
             )}
           </p>
           <div>MASA</div>

@@ -171,7 +171,7 @@ app.get("/api/health", async (_req, res) => {
 
   res.json({
     ok: database === "up",
-    service: "azamat-ai",
+    service: "crisisim-ai",
     startedAt: metrics.startedAt,
     uptimeSeconds,
     database,
